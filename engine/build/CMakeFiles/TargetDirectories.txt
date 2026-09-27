@@ -1,3 +1,0 @@
-C:/coding/projects/MiniOS-Simulator/engine/build/CMakeFiles/main.dir
-C:/coding/projects/MiniOS-Simulator/engine/build/CMakeFiles/edit_cache.dir
-C:/coding/projects/MiniOS-Simulator/engine/build/CMakeFiles/rebuild_cache.dir
