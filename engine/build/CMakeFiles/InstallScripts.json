@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/coding/projects/MiniOS-Simulator/engine/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

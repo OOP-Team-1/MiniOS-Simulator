@@ -1,0 +1,54 @@
+#include"../include/Process.h"
+
+Process::Process(std::string PID,std::string name,int priority,int arrivalTime,int burstTime)
+{
+    this->PID=PID;
+    this->name=name;
+    this->state=ProcessState::NEW;
+    this->priority=priority;
+    this->arrivalTime=arrivalTime;
+    this->burstTime=burstTime;
+    this->remainingTime=burstTime;
+}
+
+std::string Process::getPID()
+{
+    return this->PID;
+}
+
+std::string Process::getName()
+{
+    return this->name;
+}
+
+std::string Process::getState()
+{
+    switch(this->state)
+    {
+        case ProcessState::NEW: return "NEW"; break;
+        case ProcessState::READY: return "READY"; break;
+        case ProcessState::RUNNING: return "RUNNING"; break;
+        case ProcessState::BLOCKED: return "BLOCKED"; break;
+        case ProcessState::TERMINATED: return "TERMINATED"; break;
+    }
+}
+
+int Process::getPriority()
+{
+    return this->priority;
+}
+
+int Process::getArrivalTime()
+{
+    return this->arrivalTime;
+}
+
+int Process::getBurstTime()
+{
+    return this->burstTime;
+}
+
+int Process::getRemainingTime()
+{
+    return this->remainingTime;
+}
