@@ -22,11 +22,11 @@ class Process
         int remainingTime;
     public:
         Process(std::string PID,std::string name,int priority,int arrivalTime,int burstTime);
-        std::string getPID();
-        std::string getName();
-        std::string getState();
-        int getPriority();
-        int getArrivalTime();
-        int getBurstTime();
-        int getRemainingTime();
+        std::string getPID() const;
+        std::string getName() const;
+        std::string getState() const;
+        int getPriority() const;
+        int getArrivalTime() const;
+        int getBurstTime() const;
+        int getRemainingTime() const;
 };

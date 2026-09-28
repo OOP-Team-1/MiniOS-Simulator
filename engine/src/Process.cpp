@@ -11,17 +11,17 @@ Process::Process(std::string PID,std::string name,int priority,int arrivalTime,i
     this->remainingTime=burstTime;
 }
 
-std::string Process::getPID()
+std::string Process::getPID() const
 {
     return this->PID;
 }
 
-std::string Process::getName()
+std::string Process::getName() const
 {
     return this->name;
 }
 
-std::string Process::getState()
+std::string Process::getState() const
 {
     switch(this->state)
     {
@@ -33,22 +33,22 @@ std::string Process::getState()
     }
 }
 
-int Process::getPriority()
+int Process::getPriority() const
 {
     return this->priority;
 }
 
-int Process::getArrivalTime()
+int Process::getArrivalTime() const
 {
     return this->arrivalTime;
 }
 
-int Process::getBurstTime()
+int Process::getBurstTime() const
 {
     return this->burstTime;
 }
 
-int Process::getRemainingTime()
+int Process::getRemainingTime() const
 {
     return this->remainingTime;
 }

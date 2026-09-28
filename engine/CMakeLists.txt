@@ -11,4 +11,5 @@ include_directories(../include)
 add_executable(main
     ../src/main.cpp
     ../src/Process.cpp
+    ../src/ProcessManager.cpp
 )
