@@ -2,12 +2,12 @@
 #include<vector>
 using namespace std;
 
-ProcessManger::ProcessManger()
+ProcessManager::ProcessManager()
 {
     this->nextPID=1;
 }
 
-Process& ProcessManger::createProcess(std::string name,int priority,int arrivalTime,int burstTime)
+Process& ProcessManager::createProcess(std::string name,int priority,int arrivalTime,int burstTime)
 {
     string PID="P"+to_string(nextPID++);
     this->processes.emplace_back(
@@ -20,7 +20,7 @@ Process& ProcessManger::createProcess(std::string name,int priority,int arrivalT
     return this->processes.back();
 }
 
-Process* ProcessManger::getProcess(const std::string& PID)
+Process* ProcessManager::getProcess(const std::string& PID)
 {
     for(Process& process:processes)
     {
@@ -29,7 +29,7 @@ Process* ProcessManger::getProcess(const std::string& PID)
     return NULL;
 }
 
-const vector<Process>& ProcessManger::getAllProcesses() const
+const vector<Process>& ProcessManager::getAllProcesses() const
 {
     return processes;
 }

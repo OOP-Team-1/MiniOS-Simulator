@@ -29,4 +29,6 @@ class Process
         int getArrivalTime() const;
         int getBurstTime() const;
         int getRemainingTime() const;
+        void setState(ProcessState state);
+        void execute(int timeUnits);
 };

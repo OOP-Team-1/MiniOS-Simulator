@@ -12,4 +12,5 @@ add_executable(main
     ../src/main.cpp
     ../src/Process.cpp
     ../src/ProcessManager.cpp
+    ../src/CPU.cpp
 )
