@@ -13,4 +13,5 @@ add_executable(main
     ../src/Process.cpp
     ../src/ProcessManager.cpp
     ../src/CPU.cpp
+    ../src/FCFSScheduler.cpp
 )

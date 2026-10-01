@@ -2,6 +2,7 @@
 #include"../include/Process.h"
 #include"../include/ProcessManager.h"
 #include"../include/CPU.h"
+#include"../include/FCFSScheduler.h"
 
 using namespace std;
 
@@ -9,32 +10,20 @@ int main()
 {
     ProcessManager manager;
     CPU cpu;
-    Process p1=manager.createProcess("Chrome",5,0,10);
-    cout<<"Before execution: "<<endl;
-    std::cout << "State: "
-              << (p1.getState())
-              << '\n';
-    cpu.execute(p1, 3);
+    Process& p1 = manager.createProcess("Chrome", 5, 3, 10);
+    Process& p2 = manager.createProcess("Browser", 3, 0, 5);
+    Process& p3 = manager.createProcess("VSCode", 4, 2, 8);
 
-    std::cout << "\nAfter executing 3 units:\n";
-    std::cout << "Remaining: "
-              << p1.getRemainingTime()
-              << '\n';
-
-    std::cout << "State: "
-              << (p1.getState())
-              << '\n';
-
-    cpu.execute(p1, 7);
-
-    std::cout << "\nAfter executing 7 more units:\n";
-    std::cout << "Remaining: "
-              << p1.getRemainingTime()
-              << '\n';
-
-    std::cout << "State: "
-              << (p1.getState())
-              << '\n';
-
+    
+    FCFSScheduler scheduler;
+    
+    std::string nextProcess =
+    scheduler.selectNextProcess(
+        const_cast<std::vector<Process>&>(
+            manager.getAllProcesses()
+        )
+    );
+    
+    cout<<"Next process PID : "<<nextProcess<<endl;
     return 0;
 }
