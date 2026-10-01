@@ -14,4 +14,5 @@ add_executable(main
     ../src/ProcessManager.cpp
     ../src/CPU.cpp
     ../src/FCFSScheduler.cpp
+    ../src/SJFScheduler.cpp
 )

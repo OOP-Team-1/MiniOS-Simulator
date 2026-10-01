@@ -3,6 +3,7 @@
 #include"../include/ProcessManager.h"
 #include"../include/CPU.h"
 #include"../include/FCFSScheduler.h"
+#include"../include/SJFScheduler.h"
 
 using namespace std;
 
@@ -10,20 +11,26 @@ int main()
 {
     ProcessManager manager;
     CPU cpu;
-    Process& p1 = manager.createProcess("Chrome", 5, 3, 10);
+    Process& p1 = manager.createProcess("Chrome", 5, 3, 2);
     Process& p2 = manager.createProcess("Browser", 3, 0, 5);
     Process& p3 = manager.createProcess("VSCode", 4, 2, 8);
 
     
-    FCFSScheduler scheduler;
+    FCFSScheduler scheduler1;
+    SJFScheduler scheduler2;
     
-    std::string nextProcess =
-    scheduler.selectNextProcess(
+    std::string nextProcess1 =
+    scheduler1.selectNextProcess(
         const_cast<std::vector<Process>&>(
             manager.getAllProcesses()
         )
     );
-    
-    cout<<"Next process PID : "<<nextProcess<<endl;
+    std::string nextProcess2=scheduler2.selectNextProcess(
+        manager.getAllProcesses()
+    );
+
+    cout<<"Next process PID according to FCFS: "<<nextProcess1<<endl;
+    cout<<"Next process PID according to SJF: "<<nextProcess2<<endl;
+
     return 0;
 }
