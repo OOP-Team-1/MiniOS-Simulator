@@ -1,12 +1,12 @@
-#include"../include/SJFScheduler.h"
+#include"../include/SRTFScheduler.h"
 
-std::string SJFScheduler::selectNextProcess(const std::vector<Process>& processes)
+std::string SRTFScheduler::selectNextProcess(const std::vector<Process>& processes)
 {
     const Process* selectedProcess=NULL;
     for(const Process& process:processes)
     {
         if(process.getState()=="TERMINATED") continue;
-        if(!selectedProcess||process.getBurstTime()<selectedProcess->getBurstTime())
+        if(!selectedProcess||process.getRemainingTime()<selectedProcess->getRemainingTime())
         {
             selectedProcess=&process;
         }

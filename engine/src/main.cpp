@@ -4,6 +4,7 @@
 #include"../include/CPU.h"
 #include"../include/FCFSScheduler.h"
 #include"../include/SJFScheduler.h"
+#include"../include/SRTFScheduler.h"
 
 using namespace std;
 
@@ -18,6 +19,7 @@ int main()
     
     FCFSScheduler scheduler1;
     SJFScheduler scheduler2;
+    SRTFScheduler scheduler3;
     
     std::string nextProcess1 =
     scheduler1.selectNextProcess(
@@ -28,9 +30,13 @@ int main()
     std::string nextProcess2=scheduler2.selectNextProcess(
         manager.getAllProcesses()
     );
+    std::string nextProcess3=scheduler3.selectNextProcess(
+        manager.getAllProcesses()
+    );
 
     cout<<"Next process PID according to FCFS: "<<nextProcess1<<endl;
     cout<<"Next process PID according to SJF: "<<nextProcess2<<endl;
+    cout<<"Next process PID according to SRTF: "<<nextProcess3<<endl;
 
     return 0;
 }

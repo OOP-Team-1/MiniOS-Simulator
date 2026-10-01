@@ -15,4 +15,5 @@ add_executable(main
     ../src/CPU.cpp
     ../src/FCFSScheduler.cpp
     ../src/SJFScheduler.cpp
+    ../src/SRTFScheduler.cpp
 )
