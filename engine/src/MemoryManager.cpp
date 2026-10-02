@@ -1,6 +1,7 @@
 #include "../include/MemoryManager.h"
 
 #include <iostream>
+#include <sstream>
 
 MemoryManager::MemoryManager(
     int totalMemory,
@@ -39,11 +40,8 @@ bool MemoryManager::allocate(
         return false;
     }
 
-    int originalStart =
-        blocks[blockIndex].getStartAddress();
-
-    int originalSize =
-        blocks[blockIndex].getSize();
+    int originalStart = blocks[blockIndex].getStartAddress();
+    int originalSize = blocks[blockIndex].getSize();
 
     if (originalSize == size)
     {
@@ -75,9 +73,7 @@ bool MemoryManager::deallocate(const std::string& processPID)
             block.getProcessPID() == processPID)
         {
             block.deallocate();
-
             mergeFreeBlocks();
-
             return true;
         }
     }
@@ -102,7 +98,6 @@ void MemoryManager::mergeFreeBlocks()
                 blocks[i + 1].getSize();
 
             blocks[i].setSize(mergedSize);
-
             blocks.erase(blocks.begin() + i + 1);
         }
         else
@@ -110,6 +105,94 @@ void MemoryManager::mergeFreeBlocks()
             i++;
         }
     }
+}
+
+void MemoryManager::compact()
+{
+    std::vector<MemoryBlock> compactedBlocks;
+    int currentAddress = 0;
+
+    // Relocate all allocated blocks tightly to the beginning
+    for (const auto& block : blocks)
+    {
+        if (!block.isFree())
+        {
+            MemoryBlock relocatedBlock(currentAddress, block.getSize());
+            relocatedBlock.allocate(block.getProcessPID());
+            compactedBlocks.push_back(relocatedBlock);
+            currentAddress += block.getSize();
+        }
+    }
+
+    // Place the single coalesced free block at the end
+    if (currentAddress < totalMemory)
+    {
+        compactedBlocks.emplace_back(currentAddress, totalMemory - currentAddress);
+    }
+
+    blocks = std::move(compactedBlocks);
+}
+
+double MemoryManager::getExternalFragmentation() const
+{
+    int freeMem = getFreeMemory();
+    if (freeMem == 0)
+    {
+        return 0.0;
+    }
+
+    int largestFreeBlock = 0;
+    for (const auto& block : blocks)
+    {
+        if (block.isFree() && block.getSize() > largestFreeBlock)
+        {
+            largestFreeBlock = block.getSize();
+        }
+    }
+
+    return (1.0 - (static_cast<double>(largestFreeBlock) / static_cast<double>(freeMem))) * 100.0;
+}
+
+MemorySnapshot MemoryManager::getSnapshot() const
+{
+    int freeMem = getFreeMemory();
+    return {
+        totalMemory,
+        totalMemory - freeMem,
+        freeMem,
+        getExternalFragmentation(),
+        blocks
+    };
+}
+
+std::string MemoryManager::getSnapshotAsJson() const
+{
+    std::ostringstream ss;
+    int freeMem = getFreeMemory();
+    int usedMem = totalMemory - freeMem;
+
+    ss << "{\n";
+    ss << "  \"totalMemory\": " << totalMemory << ",\n";
+    ss << "  \"usedMemory\": " << usedMem << ",\n";
+    ss << "  \"freeMemory\": " << freeMem << ",\n";
+    ss << "  \"externalFragmentation\": " << getExternalFragmentation() << ",\n";
+    ss << "  \"blocks\": [\n";
+
+    for (size_t i = 0; i < blocks.size(); ++i)
+    {
+        const auto& b = blocks[i];
+        ss << "    {\n";
+        ss << "      \"start\": " << b.getStartAddress() << ",\n";
+        ss << "      \"end\": " << b.getEndAddress() << ",\n";
+        ss << "      \"size\": " << b.getSize() << ",\n";
+        ss << "      \"isFree\": " << (b.isFree() ? "true" : "false") << ",\n";
+        ss << "      \"processPID\": \"" << b.getProcessPID() << "\"\n";
+        ss << "    }" << (i + 1 < blocks.size() ? "," : "") << "\n";
+    }
+
+    ss << "  ]\n";
+    ss << "}";
+    return ss.str();
 }
 
 int MemoryManager::getTotalMemory() const
@@ -130,6 +213,11 @@ int MemoryManager::getFreeMemory() const
     }
 
     return freeMemory;
+}
+
+const std::vector<MemoryBlock>& MemoryManager::getBlocks() const
+{
+    return this->blocks;
 }
 
 void MemoryManager::displayMemory() const
@@ -164,4 +252,7 @@ void MemoryManager::displayMemory() const
     std::cout << "Free Memory: "
               << getFreeMemory()
               << " MB\n";
+    std::cout << "External Fragmentation: "
+              << getExternalFragmentation()
+              << " %\n";
 }

@@ -25,4 +25,7 @@ add_executable(main
     ../src/FirstFit.cpp
     ../src/BestFit.cpp
     ../src/WorstFit.cpp
+
+    ../src/PagingManager.cpp
+    ../src/SimulationEngine.cpp
 )

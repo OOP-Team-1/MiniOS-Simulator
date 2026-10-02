@@ -6,6 +6,15 @@
 #include "MemoryBlock.h"
 #include "AllocationStrategy.h"
 
+struct MemorySnapshot
+{
+    int totalMemory;
+    int usedMemory;
+    int freeMemory;
+    double externalFragmentation;
+    std::vector<MemoryBlock> blocks;
+};
+
 class MemoryManager
 {
 private:
@@ -30,8 +39,15 @@ public:
         const std::string& processPID
     );
 
+    // Dynamic and Real-Time Dashboard Operations
+    void compact();
+    double getExternalFragmentation() const;
+    MemorySnapshot getSnapshot() const;
+    std::string getSnapshotAsJson() const;
+
     void displayMemory() const;
 
     int getTotalMemory() const;
     int getFreeMemory() const;
+    const std::vector<MemoryBlock>& getBlocks() const;
 };
