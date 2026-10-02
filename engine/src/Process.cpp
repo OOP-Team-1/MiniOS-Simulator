@@ -25,11 +25,11 @@ std::string Process::getState() const
 {
     switch(this->state)
     {
-        case ProcessState::NEW: return "NEW"; break;
-        case ProcessState::READY: return "READY"; break;
-        case ProcessState::RUNNING: return "RUNNING"; break;
-        case ProcessState::BLOCKED: return "BLOCKED"; break;
-        case ProcessState::TERMINATED: return "TERMINATED"; break;
+        case ProcessState::NEW: return "NEW";
+        case ProcessState::READY: return "READY";
+        case ProcessState::RUNNING: return "RUNNING";
+        case ProcessState::BLOCKED: return "BLOCKED";
+        case ProcessState::TERMINATED: return "TERMINATED";
     }
     return "UNKNOWN";
 }

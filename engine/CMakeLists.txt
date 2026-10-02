@@ -18,4 +18,7 @@ add_executable(main
     ../src/SRTFScheduler.cpp
     ../src/PriorityScheduler.cpp
     ../src/RoundRobinScheduler.cpp
+    ../src/MemoryBlock.cpp
+    ../src/MemoryManager.cpp
+
 )
