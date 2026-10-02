@@ -41,6 +41,7 @@ public:
 
     // Dynamic and Real-Time Dashboard Operations
     void compact();
+    void reset();
     double getExternalFragmentation() const;
     MemorySnapshot getSnapshot() const;
     std::string getSnapshotAsJson() const;

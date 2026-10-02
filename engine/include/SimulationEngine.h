@@ -47,6 +47,8 @@ public:
     // Runs until all created processes reach TERMINATED
     void run();
 
+    void reset();
+
     int getCurrentTick() const;
     std::string getTelemetryJson() const;
 };

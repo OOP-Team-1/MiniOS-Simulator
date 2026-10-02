@@ -112,7 +112,6 @@ void MemoryManager::compact()
     std::vector<MemoryBlock> compactedBlocks;
     int currentAddress = 0;
 
-    // Relocate all allocated blocks tightly to the beginning
     for (const auto& block : blocks)
     {
         if (!block.isFree())
@@ -124,13 +123,18 @@ void MemoryManager::compact()
         }
     }
 
-    // Place the single coalesced free block at the end
     if (currentAddress < totalMemory)
     {
         compactedBlocks.emplace_back(currentAddress, totalMemory - currentAddress);
     }
 
     blocks = std::move(compactedBlocks);
+}
+
+void MemoryManager::reset()
+{
+    blocks.clear();
+    blocks.emplace_back(0, totalMemory);
 }
 
 double MemoryManager::getExternalFragmentation() const
@@ -171,27 +175,24 @@ std::string MemoryManager::getSnapshotAsJson() const
     int freeMem = getFreeMemory();
     int usedMem = totalMemory - freeMem;
 
-    ss << "{\n";
-    ss << "  \"totalMemory\": " << totalMemory << ",\n";
-    ss << "  \"usedMemory\": " << usedMem << ",\n";
-    ss << "  \"freeMemory\": " << freeMem << ",\n";
-    ss << "  \"externalFragmentation\": " << getExternalFragmentation() << ",\n";
-    ss << "  \"blocks\": [\n";
+    ss << "{\"totalMemory\":" << totalMemory
+       << ",\"usedMemory\":" << usedMem
+       << ",\"freeMemory\":" << freeMem
+       << ",\"externalFragmentation\":" << getExternalFragmentation()
+       << ",\"blocks\":[";
 
     for (size_t i = 0; i < blocks.size(); ++i)
     {
         const auto& b = blocks[i];
-        ss << "    {\n";
-        ss << "      \"start\": " << b.getStartAddress() << ",\n";
-        ss << "      \"end\": " << b.getEndAddress() << ",\n";
-        ss << "      \"size\": " << b.getSize() << ",\n";
-        ss << "      \"isFree\": " << (b.isFree() ? "true" : "false") << ",\n";
-        ss << "      \"processPID\": \"" << b.getProcessPID() << "\"\n";
-        ss << "    }" << (i + 1 < blocks.size() ? "," : "") << "\n";
+        ss << "{\"start\":" << b.getStartAddress()
+           << ",\"end\":" << b.getEndAddress()
+           << ",\"size\":" << b.getSize()
+           << ",\"isFree\":" << (b.isFree() ? "true" : "false")
+           << ",\"processPID\":\"" << b.getProcessPID() << "\"}";
+        if (i + 1 < blocks.size()) ss << ",";
     }
 
-    ss << "  ]\n";
-    ss << "}";
+    ss << "]}";
     return ss.str();
 }
 

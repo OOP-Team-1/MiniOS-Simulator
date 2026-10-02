@@ -1,20 +1,19 @@
-#include"../include/CPU.h"
+#include "../include/CPU.h"
 
-CPU::CPU()
+CPU::CPU() : currentProcess(nullptr)
 {
-    this->currentProcess=NULL;
 }
 
-void CPU::execute(Process& process,int timeUnits)
+void CPU::execute(Process& process, int timeUnits)
 {
-    currentProcess=&process;
+    currentProcess = &process;
     process.setState(ProcessState::RUNNING);
     process.execute(timeUnits);
-    if(process.getRemainingTime()>0)
+    if (process.getRemainingTime() > 0)
     {
         process.setState(ProcessState::READY);
     }
-    currentProcess=NULL;
+    currentProcess = nullptr;
 }
 
 Process* CPU::getCurrentProcess() const
@@ -24,5 +23,5 @@ Process* CPU::getCurrentProcess() const
 
 bool CPU::isIdle() const
 {
-    return currentProcess==NULL;
+    return currentProcess == nullptr;
 }

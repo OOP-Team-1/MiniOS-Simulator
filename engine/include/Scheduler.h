@@ -7,5 +7,6 @@ class Scheduler
 {
     public:
         virtual std::string selectNextProcess(const std::vector<Process*>& processes)=0;
+        virtual void reset() {}
         virtual ~Scheduler()=default;
 };

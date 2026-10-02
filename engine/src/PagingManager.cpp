@@ -2,6 +2,7 @@
 #include <iostream>
 #include <sstream>
 #include <algorithm>
+#include <limits>
 
 PagingManager::PagingManager(int totalMemory, int pageSize, ReplacementPolicy policy)
 {
@@ -41,7 +42,7 @@ int PagingManager::evictVictimFrame()
     else // LRU
     {
         int victimFrame = -1;
-        int oldestTime = 2147483647;
+        int oldestTime = std::numeric_limits<int>::max();
 
         for (int i = 0; i < totalFrames; ++i)
         {
@@ -50,7 +51,10 @@ int PagingManager::evictVictimFrame()
                 const std::string& pid = frames[i].processPID;
                 int pageNum = frames[i].pageNumber;
 
-                for (const auto& entry : pageTables[pid])
+                auto it = pageTables.find(pid);
+                if (it == pageTables.end()) continue;
+
+                for (const auto& entry : it->second)
                 {
                     if (entry.pageNumber == pageNum && entry.valid)
                     {
@@ -139,18 +143,19 @@ AddressTranslationResult PagingManager::accessAddress(const std::string& process
 {
     AddressTranslationResult result;
     result.logicalAddress = logicalAddress;
+    result.pageFault = false;
+    result.frameNumber = -1;
+    result.physicalAddress = -1;
 
     auto it = pageTables.find(processPID);
     if (it == pageTables.end())
     {
-        result.pageFault = false;
         result.message = "Process not found";
         return result;
     }
 
     if (logicalAddress < 0 || logicalAddress >= processSizes[processPID])
     {
-        result.pageFault = false;
         result.message = "Segmentation Fault: Out of logical address bounds";
         return result;
     }
@@ -175,7 +180,6 @@ AddressTranslationResult PagingManager::accessAddress(const std::string& process
 
     if (!entry)
     {
-        result.pageFault = false;
         result.message = "Invalid page lookup";
         return result;
     }
@@ -201,13 +205,22 @@ AddressTranslationResult PagingManager::accessAddress(const std::string& process
     {
         // Evict a page via FIFO / LRU
         allocatedFrame = evictVictimFrame();
-        if (allocatedFrame != -1)
-        {
-            std::string victimPID = frames[allocatedFrame].processPID;
-            int victimPage = frames[allocatedFrame].pageNumber;
 
-            // Invalidate the evicted process's page table entry
-            for (auto& victimEntry : pageTables[victimPID])
+        // guard against -1 from evictVictimFrame (no evictable frame found)
+        if (allocatedFrame == -1)
+        {
+            result.message = "Page Fault: No frame available for eviction";
+            return result;
+        }
+
+        std::string victimPID = frames[allocatedFrame].processPID;
+        int victimPage = frames[allocatedFrame].pageNumber;
+
+        // Invalidate the evicted process's page table entry
+        auto victimIt = pageTables.find(victimPID);
+        if (victimIt != pageTables.end())
+        {
+            for (auto& victimEntry : victimIt->second)
             {
                 if (victimEntry.pageNumber == victimPage)
                 {

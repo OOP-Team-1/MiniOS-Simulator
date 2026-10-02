@@ -16,4 +16,5 @@ class ProcessManager
         Process* getProcess(const std::string& PID);
         std::vector<Process*> getAllProcesses();
         std::vector<const Process*> getAllProcesses() const;
+        void clear();
 };

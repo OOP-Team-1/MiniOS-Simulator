@@ -17,6 +17,12 @@ void SimulationEngine::log(const std::string& message)
 {
     std::string entry = "[Tick " + std::to_string(currentTick) + "] " + message;
     systemLogs.push_back(entry);
+
+    // the most recent 100 log entries to prevent unbounded growth
+    if (systemLogs.size() > 100)
+    {
+        systemLogs.erase(systemLogs.begin(), systemLogs.begin() + (systemLogs.size() - 100));
+    }
 }
 
 Process& SimulationEngine::addProcess(
@@ -94,6 +100,8 @@ bool SimulationEngine::step()
 
     if (allTerminated && !allProcesses.empty())
     {
+        // mark CPU idle so telemetry shows the correct state
+        lastExecutedPID = "IDLE";
         return false;
     }
 
@@ -111,10 +119,10 @@ bool SimulationEngine::step()
         log("CPU running process " + nextPID + " (Remaining: " +
             std::to_string(processToRun->getRemainingTime()) + ")");
 
-        // 3. Execute for 1 tick
+        // Execute for 1 tick
         cpu.execute(*processToRun, 1);
 
-        // 4. Memory deallocation on termination
+        // Memory deallocation on termination
         if (processToRun->getState() == "TERMINATED")
         {
             log("Process " + nextPID + " completed execution -> Freeing memory");
@@ -142,20 +150,54 @@ void SimulationEngine::run()
     }
 }
 
+void SimulationEngine::reset()
+{
+    currentTick = 0;
+    lastExecutedPID = "NONE";
+    systemLogs.clear();
+    processManager.clear();
+    memoryManager->reset();
+    scheduler->reset(); // reset scheduler state (e.g. RR currentIndex)
+    log("Simulation reset to initial state");
+}
+
 int SimulationEngine::getCurrentTick() const
 {
     return this->currentTick;
+}
+
+// Helper: escape a string for JSON
+static std::string jsonEscape(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s)
+    {
+        switch (c)
+        {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:   out += c;      break;
+        }
+    }
+    return out;
 }
 
 std::string SimulationEngine::getTelemetryJson() const
 {
     std::ostringstream ss;
 
+    //isIdle is true whenever there is no running process
+    bool isIdle = (lastExecutedPID == "IDLE" || lastExecutedPID == "NONE");
+
     ss << "{\n";
     ss << "  \"tick\": " << currentTick << ",\n";
     ss << "  \"cpu\": {\n";
-    ss << "    \"activePID\": \"" << lastExecutedPID << "\",\n";
-    ss << "    \"isIdle\": " << (lastExecutedPID == "IDLE" ? "true" : "false") << "\n";
+    ss << "    \"activePID\": \"" << jsonEscape(lastExecutedPID) << "\",\n";
+    ss << "    \"isIdle\": " << (isIdle ? "true" : "false") << "\n";
     ss << "  },\n";
 
     // Processes array
@@ -165,9 +207,9 @@ std::string SimulationEngine::getTelemetryJson() const
     {
         const auto* p = procs[i];
         ss << "    {\n";
-        ss << "      \"pid\": \"" << p->getPID() << "\",\n";
-        ss << "      \"name\": \"" << p->getName() << "\",\n";
-        ss << "      \"state\": \"" << p->getState() << "\",\n";
+        ss << "      \"pid\": \"" << jsonEscape(p->getPID()) << "\",\n";
+        ss << "      \"name\": \"" << jsonEscape(p->getName()) << "\",\n";
+        ss << "      \"state\": \"" << jsonEscape(p->getState()) << "\",\n";
         ss << "      \"priority\": " << p->getPriority() << ",\n";
         ss << "      \"arrivalTime\": " << p->getArrivalTime() << ",\n";
         ss << "      \"burstTime\": " << p->getBurstTime() << ",\n";
@@ -180,11 +222,11 @@ std::string SimulationEngine::getTelemetryJson() const
     // Nested Memory Telemetry
     ss << "  \"memory\": " << memoryManager->getSnapshotAsJson() << ",\n";
 
-    // Recent system logs
+    // Recent system logs (already capped at 100 in log())
     ss << "  \"logs\": [\n";
     for (size_t i = 0; i < systemLogs.size(); ++i)
     {
-        ss << "    \"" << systemLogs[i] << "\"" << (i + 1 < systemLogs.size() ? "," : "") << "\n";
+        ss << "    \"" << jsonEscape(systemLogs[i]) << "\"" << (i + 1 < systemLogs.size() ? "," : "") << "\n";
     }
     ss << "  ]\n";
     ss << "}";

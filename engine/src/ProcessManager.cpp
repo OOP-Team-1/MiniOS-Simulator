@@ -38,3 +38,9 @@ std::vector<const Process*> ProcessManager::getAllProcesses() const
     }
     return list;
 }
+
+void ProcessManager::clear()
+{
+    processes.clear();
+    nextPID = 1;
+}
