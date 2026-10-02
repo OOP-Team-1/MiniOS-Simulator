@@ -20,6 +20,7 @@ class Process
         int arrivalTime;
         int burstTime;
         int remainingTime;
+        int memoryRequired;
     public:
         Process(std::string PID,std::string name,int priority,int arrivalTime,int burstTime);
         std::string getPID() const;

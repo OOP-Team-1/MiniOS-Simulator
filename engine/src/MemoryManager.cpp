@@ -2,21 +2,27 @@
 
 #include <iostream>
 
-MemoryManager::MemoryManager(int totalMemory)
+MemoryManager::MemoryManager(
+    int totalMemory,
+    AllocationStrategy& strategy
+)
 {
     this->totalMemory = totalMemory;
+    this->strategy = &strategy;
 
     blocks.emplace_back(0, totalMemory);
 }
 
-bool MemoryManager::allocate(const std::string& processPID, int size)
+bool MemoryManager::allocate(
+    const std::string& processPID,
+    int size
+)
 {
     if (size <= 0)
     {
         return false;
     }
 
-    // A process should not already own memory.
     for (const auto& block : blocks)
     {
         if (!block.isFree() &&
@@ -26,48 +32,39 @@ bool MemoryManager::allocate(const std::string& processPID, int size)
         }
     }
 
-    // For now, use the first suitable free block.
-    // The strategy abstraction will replace this later.
-    for (size_t i = 0; i < blocks.size(); i++)
+    int blockIndex = strategy->findBlock(blocks, size);
+
+    if (blockIndex == -1)
     {
-        if (!blocks[i].isFree())
-        {
-            continue;
-        }
+        return false;
+    }
 
-        if (blocks[i].getSize() < size)
-        {
-            continue;
-        }
+    int originalStart =
+        blocks[blockIndex].getStartAddress();
 
-        int originalStart = blocks[i].getStartAddress();
-        int originalSize = blocks[i].getSize();
+    int originalSize =
+        blocks[blockIndex].getSize();
 
-        // Exact fit.
-        if (originalSize == size)
-        {
-            blocks[i].allocate(processPID);
-            return true;
-        }
-
-        // Split the free block.
-        blocks[i].setSize(size);
-        blocks[i].allocate(processPID);
-
-        MemoryBlock remainingBlock(
-            originalStart + size,
-            originalSize - size
-        );
-
-        blocks.insert(
-            blocks.begin() + i + 1,
-            remainingBlock
-        );
-
+    if (originalSize == size)
+    {
+        blocks[blockIndex].allocate(processPID);
         return true;
     }
 
-    return false;
+    blocks[blockIndex].setSize(size);
+    blocks[blockIndex].allocate(processPID);
+
+    MemoryBlock remainingBlock(
+        originalStart + size,
+        originalSize - size
+    );
+
+    blocks.insert(
+        blocks.begin() + blockIndex + 1,
+        remainingBlock
+    );
+
+    return true;
 }
 
 bool MemoryManager::deallocate(const std::string& processPID)

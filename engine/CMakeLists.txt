@@ -13,12 +13,16 @@ add_executable(main
     ../src/Process.cpp
     ../src/ProcessManager.cpp
     ../src/CPU.cpp
+
     ../src/FCFSScheduler.cpp
     ../src/SJFScheduler.cpp
     ../src/SRTFScheduler.cpp
     ../src/PriorityScheduler.cpp
     ../src/RoundRobinScheduler.cpp
+
     ../src/MemoryBlock.cpp
     ../src/MemoryManager.cpp
-
+    ../src/FirstFit.cpp
+    ../src/BestFit.cpp
+    ../src/WorstFit.cpp
 )

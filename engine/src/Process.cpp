@@ -9,6 +9,7 @@ Process::Process(std::string PID,std::string name,int priority,int arrivalTime,i
     this->arrivalTime=arrivalTime;
     this->burstTime=burstTime;
     this->remainingTime=burstTime;
+    this->memoryRequired = memoryRequired;
 }
 
 std::string Process::getPID() const
