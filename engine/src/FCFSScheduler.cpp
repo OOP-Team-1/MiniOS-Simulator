@@ -1,14 +1,14 @@
 #include"../include/FCFSScheduler.h"
 
-std::string FCFSScheduler::selectNextProcess(const std::vector<Process>& processes)
+std::string FCFSScheduler::selectNextProcess(const std::vector<Process*>& processes)
 {
     const Process* selectedProcess=NULL;
-    for(const Process &process:processes)
+    for(const Process* process:processes)
     {
-        if(process.getState()=="TERMINATED") continue;
-        if(selectedProcess==NULL||process.getArrivalTime()<selectedProcess->getArrivalTime())
+        if(process->getState()!="READY") continue;
+        if(selectedProcess==NULL||process->getArrivalTime()<selectedProcess->getArrivalTime())
         {
-            selectedProcess=&process;
+            selectedProcess=process;
         }
     }
     if(!selectedProcess) return "INVALID";

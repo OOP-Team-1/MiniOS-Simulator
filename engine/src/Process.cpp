@@ -31,6 +31,7 @@ std::string Process::getState() const
         case ProcessState::BLOCKED: return "BLOCKED"; break;
         case ProcessState::TERMINATED: return "TERMINATED"; break;
     }
+    return "UNKNOWN";
 }
 
 int Process::getPriority() const

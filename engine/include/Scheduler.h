@@ -6,6 +6,6 @@
 class Scheduler
 {
     public:
-        virtual std::string selectNextProcess(const std::vector<Process>& processes)=0;
+        virtual std::string selectNextProcess(const std::vector<Process*>& processes)=0;
         virtual ~Scheduler()=default;
 };

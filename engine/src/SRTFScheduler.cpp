@@ -1,14 +1,14 @@
 #include"../include/SRTFScheduler.h"
 
-std::string SRTFScheduler::selectNextProcess(const std::vector<Process>& processes)
+std::string SRTFScheduler::selectNextProcess(const std::vector<Process*>& processes)
 {
     const Process* selectedProcess=NULL;
-    for(const Process& process:processes)
+    for(const Process* process:processes)
     {
-        if(process.getState()=="TERMINATED") continue;
-        if(!selectedProcess||process.getRemainingTime()<selectedProcess->getRemainingTime())
+        if(process->getState()!="READY") continue;
+        if(!selectedProcess||process->getRemainingTime()<selectedProcess->getRemainingTime())
         {
-            selectedProcess=&process;
+            selectedProcess=process;
         }
     }
     if(!selectedProcess) return "INVALID";

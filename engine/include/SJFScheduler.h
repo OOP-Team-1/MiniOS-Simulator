@@ -5,5 +5,5 @@
 class SJFScheduler:public Scheduler
 {
     public:
-        std::string selectNextProcess(const std::vector<Process>& processes) override;
+        std::string selectNextProcess(const std::vector<Process*>& processes) override;
 };

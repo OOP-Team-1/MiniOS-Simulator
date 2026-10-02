@@ -17,4 +17,5 @@ add_executable(main
     ../src/SJFScheduler.cpp
     ../src/SRTFScheduler.cpp
     ../src/PriorityScheduler.cpp
+    ../src/RoundRobinScheduler.cpp
 )
