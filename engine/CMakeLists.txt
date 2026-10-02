@@ -16,4 +16,5 @@ add_executable(main
     ../src/FCFSScheduler.cpp
     ../src/SJFScheduler.cpp
     ../src/SRTFScheduler.cpp
+    ../src/PriorityScheduler.cpp
 )
