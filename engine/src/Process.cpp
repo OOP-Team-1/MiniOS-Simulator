@@ -1,14 +1,14 @@
-#include"../include/Process.h"
+#include "../include/Process.h"
 
-Process::Process(std::string PID,std::string name,int priority,int arrivalTime,int burstTime)
+Process::Process(std::string PID, std::string name, int priority, int arrivalTime, int burstTime, int memoryRequired)
 {
-    this->PID=PID;
-    this->name=name;
-    this->state=ProcessState::NEW;
-    this->priority=priority;
-    this->arrivalTime=arrivalTime;
-    this->burstTime=burstTime;
-    this->remainingTime=burstTime;
+    this->PID = PID;
+    this->name = name;
+    this->state = ProcessState::NEW;
+    this->priority = priority;
+    this->arrivalTime = arrivalTime;
+    this->burstTime = burstTime;
+    this->remainingTime = burstTime;
     this->memoryRequired = memoryRequired;
 }
 
@@ -24,15 +24,15 @@ std::string Process::getName() const
 
 std::string Process::getState() const
 {
-    switch(this->state)
+    switch (this->state)
     {
-        case ProcessState::NEW: return "NEW";
-        case ProcessState::READY: return "READY";
-        case ProcessState::RUNNING: return "RUNNING";
-        case ProcessState::BLOCKED: return "BLOCKED";
+        case ProcessState::NEW:        return "NEW";
+        case ProcessState::READY:      return "READY";
+        case ProcessState::RUNNING:    return "RUNNING";
+        case ProcessState::BLOCKED:    return "BLOCKED";
         case ProcessState::TERMINATED: return "TERMINATED";
+        default:                       return "UNKNOWN";
     }
-    return "UNKNOWN";
 }
 
 int Process::getPriority() const
@@ -55,21 +55,26 @@ int Process::getRemainingTime() const
     return this->remainingTime;
 }
 
+int Process::getMemoryRequired() const
+{
+    return this->memoryRequired;
+}
+
 void Process::setState(ProcessState state)
 {
-    this->state=state;
+    this->state = state;
 }
 
 void Process::execute(int timeUnits)
 {
-    if(timeUnits<=0) return;
-    if(this->remainingTime<=timeUnits)
+    if (timeUnits <= 0) return;
+    if (this->remainingTime <= timeUnits)
     {
-        this->remainingTime=0;
-        this->state=ProcessState::TERMINATED;
+        this->remainingTime = 0;
+        this->state = ProcessState::TERMINATED;
     }
     else
     {
-        this->remainingTime-=timeUnits;
+        this->remainingTime -= timeUnits;
     }
 }

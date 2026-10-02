@@ -2,10 +2,10 @@
 
 ProcessManager::ProcessManager() : nextPID(1) {}
 
-Process& ProcessManager::createProcess(std::string name, int priority, int arrivalTime, int burstTime)
+Process& ProcessManager::createProcess(std::string name, int priority, int arrivalTime, int burstTime, int memoryRequired)
 {
     std::string PID = "P" + std::to_string(nextPID++);
-    processes.push_back(std::make_unique<Process>(PID, name, priority, arrivalTime, burstTime));
+    processes.push_back(std::make_unique<Process>(PID, name, priority, arrivalTime, burstTime, memoryRequired));
     
     return *processes.back();
 }

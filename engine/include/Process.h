@@ -22,7 +22,7 @@ class Process
         int remainingTime;
         int memoryRequired;
     public:
-        Process(std::string PID,std::string name,int priority,int arrivalTime,int burstTime);
+        Process(std::string PID,std::string name,int priority,int arrivalTime,int burstTime,int memoryRequired);
         std::string getPID() const;
         std::string getName() const;
         std::string getState() const;
@@ -30,6 +30,7 @@ class Process
         int getArrivalTime() const;
         int getBurstTime() const;
         int getRemainingTime() const;
+        int getMemoryRequired() const;
         void setState(ProcessState state);
         void execute(int timeUnits);
 };
