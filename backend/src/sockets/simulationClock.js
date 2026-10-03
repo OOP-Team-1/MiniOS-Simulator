@@ -3,23 +3,20 @@ import { sendCommand } from '../engine/processManager.js';
 let autoRunInterval = null;
 
 export function startAutoStep(intervalMs = 1000) {
-    // Prevent multiple overlapping intervals
     if (autoRunInterval) {
         clearInterval(autoRunInterval);
     }
     
-    // Automatically send the STEP command to the C++ engine every X milliseconds
+    const safeInterval = Math.max(100, parseInt(intervalMs, 10) || 1000);
+    
     autoRunInterval = setInterval(() => {
         sendCommand("STEP");
-    }, intervalMs);
-    
-    console.log(`[Simulation Clock] Auto-stepping started at ${intervalMs}ms`);
+    }, safeInterval);
 }
 
 export function stopAutoStep() {
     if (autoRunInterval) {
         clearInterval(autoRunInterval);
         autoRunInterval = null;
-        console.log("[Simulation Clock] Auto-stepping paused");
     }
 }
