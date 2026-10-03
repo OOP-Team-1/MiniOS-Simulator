@@ -3,6 +3,11 @@ import { ENGINE_BINARY_PATH } from '../config/paths.js';
 import { createStreamParser } from './streamParser.js';
 
 let engineProcess = null;
+let lastTelemetry = null;
+
+export function getLatestTelemetry() {
+    return lastTelemetry;
+}
 
 export function startEngine(onTelemetry) {
     if (engineProcess && !engineProcess.killed) {
@@ -16,7 +21,10 @@ export function startEngine(onTelemetry) {
     engineProcess = spawn(ENGINE_BINARY_PATH);
 
     // Attach our custom stream parser to safely read JSON lines
-    createStreamParser(engineProcess.stdout, onTelemetry);
+    createStreamParser(engineProcess.stdout, (telemetry) => {
+        lastTelemetry = telemetry;
+        onTelemetry(telemetry);
+    });
 
     // Route C++ std::cerr directly to the Node console
     engineProcess.stderr.on('data', (data) => {
@@ -25,6 +33,7 @@ export function startEngine(onTelemetry) {
 
     engineProcess.on('error', (err) => {
         console.error(`[Engine Error] Failed to start process: ${err.message}`);
+        engineProcess = null;
     });
 
     engineProcess.on('close', (code) => {
@@ -34,7 +43,7 @@ export function startEngine(onTelemetry) {
 }
 
 export function sendCommand(cmd) {
-    if (engineProcess && !engineProcess.killed) {
+    if (engineProcess && !engineProcess.killed && engineProcess.stdin) {
         // C++ expects line-delimited commands, so we append the newline character
         engineProcess.stdin.write(`${cmd}\n`);
     } else {

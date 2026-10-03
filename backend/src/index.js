@@ -5,6 +5,7 @@ import cors from 'cors';
 
 // Import our custom modules
 import healthRoutes from './routes/healthRoutes.js';
+import simulationRoutes from './routes/simulationRoutes.js';
 import { startEngine, killEngine } from './engine/processManager.js';
 import { registerSocketEvents } from './sockets/socketHandler.js';
 
@@ -17,6 +18,7 @@ app.use(express.json());
 
 // REST Routes
 app.use('/api', healthRoutes);
+app.use('/api', simulationRoutes);
 
 // WebSockets Setup
 // Configure CORS to allow connections from Vite's default dev server port (5173)
@@ -56,3 +58,4 @@ const handleShutdown = () => {
 
 process.on('SIGINT', handleShutdown);
 process.on('SIGTERM', handleShutdown);
+process.on('uncaughtException', handleShutdown);

@@ -19,9 +19,9 @@ void SimulationEngine::log(const std::string& message)
     systemLogs.push_back(entry);
 
     // the most recent 100 log entries to prevent unbounded growth
-    if (systemLogs.size() > 100)
+    while (systemLogs.size() > 100)
     {
-        systemLogs.erase(systemLogs.begin(), systemLogs.begin() + (systemLogs.size() - 100));
+        systemLogs.pop_front();
     }
 }
 
@@ -190,46 +190,41 @@ std::string SimulationEngine::getTelemetryJson() const
 {
     std::ostringstream ss;
 
-    //isIdle is true whenever there is no running process
+    // isIdle is true whenever there is no running process
     bool isIdle = (lastExecutedPID == "IDLE" || lastExecutedPID == "NONE");
 
-    ss << "{\n";
-    ss << "  \"tick\": " << currentTick << ",\n";
-    ss << "  \"cpu\": {\n";
-    ss << "    \"activePID\": \"" << jsonEscape(lastExecutedPID) << "\",\n";
-    ss << "    \"isIdle\": " << (isIdle ? "true" : "false") << "\n";
-    ss << "  },\n";
+    ss << "{\"tick\":" << currentTick << ",";
+    ss << "\"cpu\":{\"activePID\":\"" << jsonEscape(lastExecutedPID) << "\",\"isIdle\":" << (isIdle ? "true" : "false") << "},";
 
     // Processes array
-    ss << "  \"processes\": [\n";
+    ss << "\"processes\":[";
     auto procs = processManager.getAllProcesses();
     for (size_t i = 0; i < procs.size(); ++i)
     {
         const auto* p = procs[i];
-        ss << "    {\n";
-        ss << "      \"pid\": \"" << jsonEscape(p->getPID()) << "\",\n";
-        ss << "      \"name\": \"" << jsonEscape(p->getName()) << "\",\n";
-        ss << "      \"state\": \"" << jsonEscape(p->getState()) << "\",\n";
-        ss << "      \"priority\": " << p->getPriority() << ",\n";
-        ss << "      \"arrivalTime\": " << p->getArrivalTime() << ",\n";
-        ss << "      \"burstTime\": " << p->getBurstTime() << ",\n";
-        ss << "      \"remainingTime\": " << p->getRemainingTime() << ",\n";
-        ss << "      \"memoryRequired\": " << p->getMemoryRequired() << "\n";
-        ss << "    }" << (i + 1 < procs.size() ? "," : "") << "\n";
+        ss << "{\"pid\":\"" << jsonEscape(p->getPID()) << "\","
+           << "\"name\":\"" << jsonEscape(p->getName()) << "\","
+           << "\"state\":\"" << jsonEscape(p->getState()) << "\","
+           << "\"priority\":" << p->getPriority() << ","
+           << "\"arrivalTime\":" << p->getArrivalTime() << ","
+           << "\"burstTime\":" << p->getBurstTime() << ","
+           << "\"remainingTime\":" << p->getRemainingTime() << ","
+           << "\"memoryRequired\":" << p->getMemoryRequired() << "}";
+        if (i + 1 < procs.size()) ss << ",";
     }
-    ss << "  ],\n";
+    ss << "],";
 
-    // Nested Memory Telemetry
-    ss << "  \"memory\": " << memoryManager->getSnapshotAsJson() << ",\n";
+    // Nested Memory Telemetry (already compact)
+    ss << "\"memory\":" << memoryManager->getSnapshotAsJson() << ",";
 
-    // Recent system logs (already capped at 100 in log())
-    ss << "  \"logs\": [\n";
+    // Recent system logs
+    ss << "\"logs\":[";
     for (size_t i = 0; i < systemLogs.size(); ++i)
     {
-        ss << "    \"" << jsonEscape(systemLogs[i]) << "\"" << (i + 1 < systemLogs.size() ? "," : "") << "\n";
+        ss << "\"" << jsonEscape(systemLogs[i]) << "\"";
+        if (i + 1 < systemLogs.size()) ss << ",";
     }
-    ss << "  ]\n";
-    ss << "}";
+    ss << "]}";
 
     return ss.str();
 }

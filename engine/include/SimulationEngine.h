@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <deque>
 
 #include "ProcessManager.h"
 #include "CPU.h"
@@ -19,7 +20,7 @@ private:
 
     int currentTick;
     std::string lastExecutedPID;
-    std::vector<std::string> systemLogs;
+    std::deque<std::string> systemLogs;
 
     void log(const std::string& message);
     void checkPendingProcesses();
