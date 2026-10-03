@@ -50,5 +50,8 @@ public:
 
     int getTotalMemory() const;
     int getFreeMemory() const;
+
+    void setStrategy(AllocationStrategy& newStrategy);
+
     const std::vector<MemoryBlock>& getBlocks() const;
 };

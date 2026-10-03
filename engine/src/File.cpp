@@ -31,3 +31,11 @@ int File::getLastAccessedAt() const { return this->lastAccessedAt; }
 
 void File::setOpen(bool open) { this->open = open; }
 void File::setLastAccessedAt(int tick) { this->lastAccessedAt = tick; }
+void File::setAllocatedBlocks(const std::vector<int>& newBlocks)
+{
+    this->allocatedBlocks = newBlocks;
+}
+void File::setName(const std::string& newName)
+{
+    this->name = newName;
+}

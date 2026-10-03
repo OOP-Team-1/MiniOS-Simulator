@@ -3,7 +3,13 @@
 #include <sstream>
 
 #include "../include/FirstFit.h"
+#include "../include/BestFit.h"
+#include "../include/WorstFit.h"
 #include "../include/RoundRobinScheduler.h"
+#include "../include/FCFSScheduler.h"
+#include "../include/SJFScheduler.h"
+#include "../include/SRTFScheduler.h"
+#include "../include/PriorityScheduler.h"
 #include "../include/MemoryManager.h"
 #include "../include/ContiguousAllocation.h"
 #include "../include/FileSystem.h"
@@ -14,18 +20,32 @@ int main()
     std::ios_base::sync_with_stdio(false);
     std::cin.tie(nullptr);
 
-    // Memory: 100 MB, First Fit
-    FirstFit memStrategy;
-    MemoryManager memManager(100, memStrategy);
+    // ── Memory allocation strategies (all pre-constructed) ───────────────────
+    FirstFit  firstFit;
+    BestFit   bestFit;
+    WorstFit  worstFit;
 
-    // Disk: 64 blocks × 4 KB = 256 KB simulated disk, Contiguous allocation
+    // Start with FirstFit
+    MemoryManager memManager(100, firstFit);
+
+    // ── Disk ──────────────────────────────────────────────────────────────────
     ContiguousAllocation fileStrategy;
     FileSystem fileSystem(64, 4, fileStrategy);
 
-    // Scheduler: Round Robin, quantum = 2
-    RoundRobinScheduler rrScheduler(2);
+    // ── CPU Schedulers (all pre-constructed) ──────────────────────────────────
+    FCFSScheduler     fcfs;
+    SJFScheduler      sjf;
+    SRTFScheduler     srtf;
+    PriorityScheduler priority;
+    RoundRobinScheduler rr(2);   // default quantum = 2
 
-    SimulationEngine engine(memManager, fileSystem, rrScheduler);
+    // Start with Round Robin
+    SimulationEngine engine(memManager, fileSystem, rr);
+
+    // Track current config for telemetry
+    std::string currentScheduler = "RR";
+    int         currentQuantum   = 2;
+    std::string currentAlloc     = "FirstFit";
 
     // Demo processes
     engine.addProcess("WebBrowser",  2, 0, 6, 30);
@@ -61,6 +81,12 @@ int main()
             std::cout << engine.getTelemetryJson() << "\n";
             std::cout.flush();
         }
+        else if (command == "DISK_COMPACT")
+        {
+            engine.compactDisk();
+            std::cout << engine.getTelemetryJson() << "\n";
+            std::cout.flush();
+        }
         else if (command == "RESET")
         {
             engine.reset();
@@ -70,10 +96,10 @@ int main()
         else if (command == "ADD")
         {
             std::string name;
-            int priority, arrivalTime, burstTime, memoryRequired;
-            if (iss >> name >> priority >> arrivalTime >> burstTime >> memoryRequired)
+            int p, a, b, m;
+            if (iss >> name >> p >> a >> b >> m)
             {
-                engine.addProcess(name, priority, arrivalTime, burstTime, memoryRequired);
+                engine.addProcess(name, p, a, b, m);
                 std::cout << engine.getTelemetryJson() << "\n";
                 std::cout.flush();
             }
@@ -85,7 +111,6 @@ int main()
         }
         else if (command == "FILE_CREATE")
         {
-            // Usage: FILE_CREATE <ownerPID> <name> <sizeInBlocks> [dirPath]
             std::string ownerPID, name, dirPath;
             int sizeInBlocks;
             if (iss >> ownerPID >> name >> sizeInBlocks)
@@ -103,7 +128,6 @@ int main()
         }
         else if (command == "FILE_DELETE")
         {
-            // Usage: FILE_DELETE <fileId>
             std::string fileId;
             if (iss >> fileId)
             {
@@ -119,7 +143,6 @@ int main()
         }
         else if (command == "FILE_OPEN")
         {
-            // Usage: FILE_OPEN <fileId> <byPID>
             std::string fileId, byPID;
             if (iss >> fileId >> byPID)
             {
@@ -135,7 +158,6 @@ int main()
         }
         else if (command == "FILE_CLOSE")
         {
-            // Usage: FILE_CLOSE <fileId> <byPID>
             std::string fileId, byPID;
             if (iss >> fileId >> byPID)
             {
@@ -146,6 +168,116 @@ int main()
             else
             {
                 std::cerr << "[Engine Error] Usage: FILE_CLOSE <fileId> <byPID>\n";
+                std::cerr.flush();
+            }
+        }
+        else if (command == "FILE_RENAME")
+        {
+            std::string fileId, newName;
+            if (iss >> fileId >> newName)
+            {
+                engine.renameFile(fileId, newName);
+                std::cout << engine.getTelemetryJson() << "\n";
+                std::cout.flush();
+            }
+            else
+            {
+                std::cerr << "[Engine Error] Usage: FILE_RENAME <fileId> <newName>\n";
+                std::cerr.flush();
+            }
+        }
+        else if (command == "SET_SCHEDULER")
+        {
+            // Usage: SET_SCHEDULER <FCFS|SJF|SRTF|PRIORITY|RR> [quantum]
+            std::string type;
+            if (iss >> type)
+            {
+                if (type == "RR")
+                {
+                    int quantum = 2;
+                    iss >> quantum;
+                    if (quantum < 1) quantum = 1;
+                    rr = RoundRobinScheduler(quantum);
+                    engine.setScheduler(rr);
+                    currentScheduler = "RR";
+                    currentQuantum   = quantum;
+                }
+                else if (type == "FCFS")
+                {
+                    engine.setScheduler(fcfs);
+                    currentScheduler = "FCFS";
+                    currentQuantum   = 0;
+                }
+                else if (type == "SJF")
+                {
+                    engine.setScheduler(sjf);
+                    currentScheduler = "SJF";
+                    currentQuantum   = 0;
+                }
+                else if (type == "SRTF")
+                {
+                    engine.setScheduler(srtf);
+                    currentScheduler = "SRTF";
+                    currentQuantum   = 0;
+                }
+                else if (type == "PRIORITY")
+                {
+                    engine.setScheduler(priority);
+                    currentScheduler = "PRIORITY";
+                    currentQuantum   = 0;
+                }
+                else
+                {
+                    std::cerr << "[Engine Error] Unknown scheduler: " << type << "\n";
+                    std::cerr.flush();
+                    continue;
+                }
+
+                engine.setCurrentSchedulerName(currentScheduler, currentQuantum);
+                std::cout << engine.getTelemetryJson() << "\n";
+                std::cout.flush();
+            }
+            else
+            {
+                std::cerr << "[Engine Error] Usage: SET_SCHEDULER <FCFS|SJF|SRTF|PRIORITY|RR> [quantum]\n";
+                std::cerr.flush();
+            }
+        }
+        else if (command == "SET_ALLOC")
+        {
+            // Usage: SET_ALLOC <FirstFit|BestFit|WorstFit>
+            std::string type;
+            if (iss >> type)
+            {
+                if (type == "FirstFit")
+                {
+                    memManager.setStrategy(firstFit);
+                    currentAlloc = "FirstFit";
+                }
+                else if (type == "BestFit")
+                {
+                    memManager.setStrategy(bestFit);
+                    currentAlloc = "BestFit";
+                }
+                else if (type == "WorstFit")
+                {
+                    memManager.setStrategy(worstFit);
+                    currentAlloc = "WorstFit";
+                }
+                else
+                {
+                    std::cerr << "[Engine Error] Unknown strategy: " << type << "\n";
+                    std::cerr.flush();
+                    continue;
+                }
+
+                engine.setCurrentAllocName(currentAlloc);
+                std::cout << engine.getTelemetryJson() << "\n";
+                std::cout.flush();
+            }
+            else
+            {
+                std::cerr << "[Engine Error] Usage: SET_ALLOC <FirstFit|BestFit|WorstFit>\n";
                 std::cerr.flush();
             }
         }

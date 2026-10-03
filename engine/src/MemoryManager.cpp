@@ -221,6 +221,11 @@ const std::vector<MemoryBlock>& MemoryManager::getBlocks() const
     return this->blocks;
 }
 
+void MemoryManager::setStrategy(AllocationStrategy& newStrategy)
+{
+    this->strategy = &newStrategy;
+}
+
 void MemoryManager::displayMemory() const
 {
     std::cout << "\n===== Memory State =====\n";

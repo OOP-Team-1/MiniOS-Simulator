@@ -109,6 +109,15 @@ bool FileSystem::closeFile(const std::string& fileId, const std::string& byPID)
     return true;
 }
 
+bool FileSystem::renameFile(const std::string& fileId, const std::string& newName)
+{
+    if (newName.empty()) return false;
+    File* file = findFile(fileId);
+    if (!file) return false;
+    file->setName(newName);
+    return true;
+}
+
 void FileSystem::handleProcessTermination(const std::string& pid)
 {
     // Collect fileIds owned by this process
@@ -150,6 +159,42 @@ void FileSystem::reset()
     for (auto& b : blocks)
     {
         b.deallocate();
+    }
+}
+
+void FileSystem::compact()
+{
+    // Collect all allocated files in their current order and reassign them to contiguous blocks starting from 0
+    int nextBlock = 0;
+
+    for (auto& f : files)
+    {
+        const std::vector<int>& oldBlocks = f->getAllocatedBlocks();
+        int size = static_cast<int>(oldBlocks.size());
+
+        // Build the new block list
+        std::vector<int> newBlocks;
+        for (int i = 0; i < size; i++)
+        {
+            newBlocks.push_back(nextBlock + i);
+        }
+
+        // Free old blocks
+        for (int blockId : oldBlocks)
+        {
+            blocks[blockId].deallocate();
+        }
+
+        // Allocate new contiguous blocks
+        for (int blockId : newBlocks)
+        {
+            blocks[blockId].allocate(f->getFileId());
+        }
+
+        // Update the file's allocation record
+        f->setAllocatedBlocks(newBlocks);
+
+        nextBlock += size;
     }
 }
 

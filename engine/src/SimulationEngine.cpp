@@ -11,7 +11,10 @@ SimulationEngine::SimulationEngine(
     memoryManager(&memManager),
     fileSystem(&fs),
     currentTick(0),
-    lastExecutedPID("NONE")
+    lastExecutedPID("NONE"),
+    schedulerName("RR"),
+    schedulerQuantum(2),
+    allocName("FirstFit")
 {
 }
 
@@ -93,6 +96,22 @@ bool SimulationEngine::closeFile(const std::string& fileId, const std::string& b
     return ok;
 }
 
+void SimulationEngine::compactDisk()
+{
+    fileSystem->compact();
+    log("Disk compacted — all files relocated to contiguous blocks");
+}
+
+bool SimulationEngine::renameFile(const std::string& fileId, const std::string& newName)
+{
+    bool ok = fileSystem->renameFile(fileId, newName);
+    if (ok)
+        log("File renamed: " + fileId + " -> \"" + newName + "\"");
+    else
+        log("File rename FAILED: " + fileId + " (not found or empty name)");
+    return ok;
+}
+
 // ── Scheduler / MemoryManager setters ────────────────────────────────────────
 
 void SimulationEngine::setScheduler(Scheduler& newScheduler)
@@ -103,6 +122,20 @@ void SimulationEngine::setScheduler(Scheduler& newScheduler)
 void SimulationEngine::setMemoryManager(MemoryManager& newMemoryManager)
 {
     this->memoryManager = &newMemoryManager;
+}
+
+void SimulationEngine::setCurrentSchedulerName(const std::string& name, int quantum)
+{
+    schedulerName    = name;
+    schedulerQuantum = quantum;
+    log("Scheduler switched to " + name +
+        (quantum > 0 ? " (quantum=" + std::to_string(quantum) + ")" : ""));
+}
+
+void SimulationEngine::setCurrentAllocName(const std::string& name)
+{
+    allocName = name;
+    log("Memory allocation strategy switched to " + name);
 }
 
 // ── Admission control ─────────────────────────────────────────────────────────
@@ -256,6 +289,12 @@ std::string SimulationEngine::getTelemetryJson() const
 
     // CPU
     ss << "\"cpu\":{\"activePID\":\"" << jsonEscape(lastExecutedPID) << "\",\"isIdle\":" << (isIdle ? "true" : "false") << "},";
+
+    // Active config (scheduler + alloc strategy)
+    ss << "\"config\":{"
+       << "\"scheduler\":\"" << jsonEscape(schedulerName) << "\","
+       << "\"quantum\":" << schedulerQuantum << ","
+       << "\"allocStrategy\":\"" << jsonEscape(allocName) << "\"},";
 
     // Processes array
     ss << "\"processes\":[";

@@ -24,6 +24,10 @@ private:
     std::string lastExecutedPID;
     std::deque<std::string> systemLogs;
 
+    std::string schedulerName;
+    int schedulerQuantum;
+    std::string allocName;
+
     void log(const std::string& message);
     void checkPendingProcesses();
 
@@ -63,6 +67,13 @@ public:
 
     void reset();
 
+    void compactDisk();
+
+    bool renameFile(const std::string& fileId, const std::string& newName);
+
+    void setCurrentSchedulerName(const std::string& name, int quantum);
+    void setCurrentAllocName(const std::string& name);
+    
     int getCurrentTick() const;
     std::string getTelemetryJson() const;
 };

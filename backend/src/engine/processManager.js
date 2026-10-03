@@ -7,14 +7,16 @@ let lastTelemetry = null;
 let telemetryCallback = null;
 let errorCallback = null;
 let isShuttingDown = false;
+let restartCallback = null;
 
 export function getLatestTelemetry() {
     return lastTelemetry;
 }
 
-export function startEngine(onTelemetry, onError) {
+export function startEngine(onTelemetry, onError, onRestart) {
     if (onTelemetry) telemetryCallback = onTelemetry;
     if (onError) errorCallback = onError;
+    if (onRestart)   restartCallback    = onRestart;
     
     if (engineProcess && !engineProcess.killed) {
         console.warn("Engine is already running.");
@@ -46,6 +48,14 @@ export function startEngine(onTelemetry, onError) {
         console.log(`[Engine] Process exited with code ${code}`);
         engineProcess = null;
         if (!isShuttingDown) {
+            if (restartCallback) restartCallback();
+            setTimeout(() => startEngine(), 1000);
+        }
+    });
+    engineProcess.on('error', () => {
+        engineProcess = null;
+        if (!isShuttingDown) {
+            if (restartCallback) restartCallback();
             setTimeout(() => startEngine(), 1000);
         }
     });

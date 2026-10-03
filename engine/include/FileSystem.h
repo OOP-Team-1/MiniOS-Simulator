@@ -55,6 +55,8 @@ public:
     int getUsedBlockCount() const;
 
     void reset();
+    void compact();
+    bool renameFile(const std::string& fileId, const std::string& newName);
 
     std::string getSnapshotAsJson() const;
 };

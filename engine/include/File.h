@@ -37,4 +37,6 @@ public:
 
     void setOpen(bool open);
     void setLastAccessedAt(int tick);
+    void setAllocatedBlocks(const std::vector<int>& blocks);
+    void setName(const std::string& newName);
 };

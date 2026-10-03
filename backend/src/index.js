@@ -35,6 +35,12 @@ startEngine(
     },
     (errorData) => {
         io.emit('engine:error', errorData);
+    },
+    () => {
+        io.emit('engine:restarted', {
+            message: 'Engine crashed and is restarting. State has been reset.',
+            timestamp: new Date().toISOString()
+        });
     }
 );
 
