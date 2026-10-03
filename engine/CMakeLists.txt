@@ -31,4 +31,9 @@ add_executable(main
 
     ../src/PagingManager.cpp
     ../src/SimulationEngine.cpp
+
+    ../src/FileBlock.cpp
+    ../src/File.cpp
+    ../src/ContiguousAllocation.cpp
+    ../src/FileSystem.cpp
 )

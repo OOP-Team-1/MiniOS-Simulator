@@ -5,9 +5,11 @@
 
 SimulationEngine::SimulationEngine(
     MemoryManager& memManager,
+    FileSystem& fs,
     Scheduler& cpuScheduler
 ) : scheduler(&cpuScheduler),
     memoryManager(&memManager),
+    fileSystem(&fs),
     currentTick(0),
     lastExecutedPID("NONE")
 {
@@ -42,6 +44,57 @@ Process& SimulationEngine::addProcess(
     );
 }
 
+// ── File operation wrappers ───────────────────────────────────────────────────
+
+std::string SimulationEngine::createFile(const std::string& ownerPID,
+                                         const std::string& name,
+                                         int sizeInBlocks,
+                                         const std::string& dirPath)
+{
+    std::string fileId = fileSystem->createFile(ownerPID, name, sizeInBlocks, currentTick, dirPath);
+
+    if (!fileId.empty())
+        log("File created: " + fileId + " (\"" + name + "\") by " + ownerPID +
+            " | " + std::to_string(sizeInBlocks) + " blocks at " + dirPath);
+    else
+        log("File creation FAILED for \"" + name + "\" by " + ownerPID +
+            " (disk full or fragmented)");
+
+    return fileId;
+}
+
+bool SimulationEngine::deleteFile(const std::string& fileId)
+{
+    bool ok = fileSystem->deleteFile(fileId);
+    if (ok)
+        log("File deleted: " + fileId);
+    else
+        log("File delete FAILED: " + fileId + " not found");
+    return ok;
+}
+
+bool SimulationEngine::openFile(const std::string& fileId, const std::string& byPID)
+{
+    bool ok = fileSystem->openFile(fileId, byPID, currentTick);
+    if (ok)
+        log("File opened: " + fileId + " by " + byPID);
+    else
+        log("File open FAILED: " + fileId + " (not found or already open)");
+    return ok;
+}
+
+bool SimulationEngine::closeFile(const std::string& fileId, const std::string& byPID)
+{
+    bool ok = fileSystem->closeFile(fileId, byPID);
+    if (ok)
+        log("File closed: " + fileId + " by " + byPID);
+    else
+        log("File close FAILED: " + fileId + " (not found or not open by " + byPID + ")");
+    return ok;
+}
+
+// ── Scheduler / MemoryManager setters ────────────────────────────────────────
+
 void SimulationEngine::setScheduler(Scheduler& newScheduler)
 {
     this->scheduler = &newScheduler;
@@ -51,6 +104,8 @@ void SimulationEngine::setMemoryManager(MemoryManager& newMemoryManager)
 {
     this->memoryManager = &newMemoryManager;
 }
+
+// ── Admission control ─────────────────────────────────────────────────────────
 
 void SimulationEngine::checkPendingProcesses()
 {
@@ -69,19 +124,23 @@ void SimulationEngine::checkPendingProcesses()
                 if (allocated)
                 {
                     process->setState(ProcessState::READY);
-                    log("Process " + process->getPID() + " (" + process->getName() + ") allocated " +
-                        std::to_string(process->getMemoryRequired()) + " MB memory -> Moved to READY");
+                    log("Process " + process->getPID() + " (" + process->getName() +
+                        ") allocated " + std::to_string(process->getMemoryRequired()) +
+                        " MB memory -> READY");
                 }
                 else if (process->getState() == "NEW")
                 {
                     process->setState(ProcessState::BLOCKED);
-                    log("Memory allocation failed for " + process->getPID() +
-                        " (" + std::to_string(process->getMemoryRequired()) + " MB required) -> Moved to BLOCKED");
+                    log("Memory allocation FAILED for " + process->getPID() +
+                        " (" + std::to_string(process->getMemoryRequired()) +
+                        " MB required) -> BLOCKED");
                 }
             }
         }
     }
 }
+
+// ── Core step ────────────────────────────────────────────────────────────────
 
 bool SimulationEngine::step()
 {
@@ -100,15 +159,14 @@ bool SimulationEngine::step()
 
     if (allTerminated && !allProcesses.empty())
     {
-        // mark CPU idle so telemetry shows the correct state
         lastExecutedPID = "IDLE";
         return false;
     }
 
-    // 1. Admission Control: Try allocating memory for arrived NEW/BLOCKED processes
+    // 1. Admission control
     checkPendingProcesses();
 
-    // 2. Schedule: Ask CPU scheduler for next READY process
+    // 2. Schedule
     std::string nextPID = scheduler->selectNextProcess(processManager.getAllProcesses()).PID;
 
     if (nextPID != "INVALID")
@@ -119,16 +177,16 @@ bool SimulationEngine::step()
         log("CPU running process " + nextPID + " (Remaining: " +
             std::to_string(processToRun->getRemainingTime()) + ")");
 
-        // Execute for 1 tick
         cpu.execute(*processToRun, 1);
 
-        // Memory deallocation on termination
+        // 3. On termination: free memory AND file system resources
         if (processToRun->getState() == "TERMINATED")
         {
-            log("Process " + nextPID + " completed execution -> Freeing memory");
+            log("Process " + nextPID + " completed -> freeing memory and files");
             memoryManager->deallocate(nextPID);
+            fileSystem->handleProcessTermination(nextPID);
 
-            // Wake up and re-test any BLOCKED processes waiting for freed space
+            // Re-check blocked processes now that memory may have freed up
             checkPendingProcesses();
         }
     }
@@ -144,10 +202,7 @@ bool SimulationEngine::step()
 
 void SimulationEngine::run()
 {
-    while (step())
-    {
-        // Loop runs until all processes terminate
-    }
+    while (step()) {}
 }
 
 void SimulationEngine::reset()
@@ -157,7 +212,8 @@ void SimulationEngine::reset()
     systemLogs.clear();
     processManager.clear();
     memoryManager->reset();
-    scheduler->reset(); // reset scheduler state (e.g. RR currentIndex)
+    fileSystem->reset();
+    scheduler->reset();
     log("Simulation reset to initial state");
 }
 
@@ -166,7 +222,8 @@ int SimulationEngine::getCurrentTick() const
     return this->currentTick;
 }
 
-// Helper: escape a string for JSON
+// ── JSON helpers ──────────────────────────────────────────────────────────────
+
 static std::string jsonEscape(const std::string& s)
 {
     std::string out;
@@ -186,6 +243,8 @@ static std::string jsonEscape(const std::string& s)
     return out;
 }
 
+// ── Telemetry ─────────────────────────────────────────────────────────────────
+
 std::string SimulationEngine::getTelemetryJson() const
 {
     std::ostringstream ss;
@@ -194,6 +253,8 @@ std::string SimulationEngine::getTelemetryJson() const
     bool isIdle = (lastExecutedPID == "IDLE" || lastExecutedPID == "NONE");
 
     ss << "{\"tick\":" << currentTick << ",";
+
+    // CPU
     ss << "\"cpu\":{\"activePID\":\"" << jsonEscape(lastExecutedPID) << "\",\"isIdle\":" << (isIdle ? "true" : "false") << "},";
 
     // Processes array
@@ -214,10 +275,13 @@ std::string SimulationEngine::getTelemetryJson() const
     }
     ss << "],";
 
-    // Nested Memory Telemetry (already compact)
+    // Memory
     ss << "\"memory\":" << memoryManager->getSnapshotAsJson() << ",";
 
-    // Recent system logs
+    // File System
+    ss << "\"filesystem\":" << fileSystem->getSnapshotAsJson() << ",";
+
+    // Logs
     ss << "\"logs\":[";
     for (size_t i = 0; i < systemLogs.size(); ++i)
     {

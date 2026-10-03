@@ -9,6 +9,7 @@
 #include "CPU.h"
 #include "Scheduler.h"
 #include "MemoryManager.h"
+#include "FileSystem.h"
 
 class SimulationEngine
 {
@@ -17,6 +18,7 @@ private:
     CPU cpu;
     Scheduler* scheduler;
     MemoryManager* memoryManager;
+    FileSystem* fileSystem;
 
     int currentTick;
     std::string lastExecutedPID;
@@ -28,6 +30,7 @@ private:
 public:
     SimulationEngine(
         MemoryManager& memManager,
+        FileSystem& fileSystem,
         Scheduler& cpuScheduler
     );
 
@@ -38,6 +41,16 @@ public:
         int burstTime,
         int memoryRequired
     );
+
+    // File operations — called by main.cpp command handler
+    std::string createFile(const std::string& ownerPID,
+                           const std::string& name,
+                           int sizeInBlocks,
+                           const std::string& dirPath = "/");
+
+    bool deleteFile(const std::string& fileId);
+    bool openFile(const std::string& fileId, const std::string& byPID);
+    bool closeFile(const std::string& fileId, const std::string& byPID);
 
     void setScheduler(Scheduler& newScheduler);
     void setMemoryManager(MemoryManager& newMemoryManager);
