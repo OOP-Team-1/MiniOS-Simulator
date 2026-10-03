@@ -1,6 +1,6 @@
 #include"../include/FCFSScheduler.h"
 
-std::string FCFSScheduler::selectNextProcess(const std::vector<Process*>& processes)
+SchedulingDecision FCFSScheduler::selectNextProcess(const std::vector<Process*>& processes)
 {
     const Process* selectedProcess=NULL;
     for(const Process* process:processes)
@@ -11,6 +11,6 @@ std::string FCFSScheduler::selectNextProcess(const std::vector<Process*>& proces
             selectedProcess=process;
         }
     }
-    if(!selectedProcess) return "INVALID";
-    return selectedProcess->getPID();
+    if(!selectedProcess) return {"INVALID",-1};
+    return {selectedProcess->getPID(),selectedProcess->getRemainingTime()};
 }

@@ -13,9 +13,9 @@ RoundRobinScheduler::RoundRobinScheduler(int timeQuantum)
 // We maintain: which PID is currently "in its slice" and how many ticks remain.
 // - If the current process still has ticks left in its quantum AND is still READY, keep it.
 // - Otherwise, move to the next READY process and give it a fresh quantum.
-std::string RoundRobinScheduler::selectNextProcess(const std::vector<Process*>& processes)
+SchedulingDecision RoundRobinScheduler::selectNextProcess(const std::vector<Process*>& processes)
 {
-    if (processes.empty()) return "INVALID";
+    if (processes.empty()) return {"INVALID",-1};
 
     int n = static_cast<int>(processes.size());
 
@@ -29,7 +29,7 @@ std::string RoundRobinScheduler::selectNextProcess(const std::vector<Process*>& 
                 processes[i]->getState() == "READY")
             {
                 remainingQuantum--;
-                return currentPID;
+                return {currentPID,processes[i]->getRemainingTime()};
             }
         }
         // Current process is gone / no longer READY — fall through to pick next
@@ -44,13 +44,13 @@ std::string RoundRobinScheduler::selectNextProcess(const std::vector<Process*>& 
         currentIndex = (ind + 1) % n;
         currentPID = processes[ind]->getPID();
         remainingQuantum = timeQuantum - 1; // this tick counts as the first
-        return currentPID;
+        return {currentPID,processes[ind]->getRemainingTime()};
     }
 
     // No READY process found
     currentPID = "";
     remainingQuantum = 0;
-    return "INVALID";
+    return {"INVALID",-1};
 }
 
 //reset scheduler state after SimulationEngine::reset()

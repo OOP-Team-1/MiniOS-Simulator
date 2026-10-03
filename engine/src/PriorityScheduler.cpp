@@ -1,6 +1,6 @@
 #include"../include/PriorityScheduler.h"
 
-std::string PriorityScheduler::selectNextProcess(const std::vector<Process*>& processes)
+SchedulingDecision PriorityScheduler::selectNextProcess(const std::vector<Process*>& processes)
 {
     const Process* selectedProcess=NULL;
     for(const Process* process:processes)
@@ -11,6 +11,6 @@ std::string PriorityScheduler::selectNextProcess(const std::vector<Process*>& pr
             selectedProcess=process;
         }
     }
-    if(!selectedProcess) return "INVALID";
-    return selectedProcess->getPID();
+    if(!selectedProcess) return {"INVALID",-1};
+    return {selectedProcess->getPID(),selectedProcess->getRemainingTime()};
 }

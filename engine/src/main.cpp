@@ -1,87 +1,107 @@
 #include <iostream>
-#include <string>
-#include <sstream>
-#include "../include/FirstFit.h"
+
+#include "../include/Kernel.h"
+#include "../include/FCFSScheduler.h"
+#include "../include/SJFScheduler.h"
+#include "../include/SRTFScheduler.h"
 #include "../include/RoundRobinScheduler.h"
-#include "../include/SimulationEngine.h"
+#include "../include/PriorityScheduler.h"
+
+void testFCFS()
+{
+    std::cout << "\n========== FCFS ==========\n";
+
+    FCFSScheduler scheduler;
+    Kernel kernel(&scheduler);
+
+    kernel.createProcess("P1", 1, 0, 5, 100);
+    kernel.createProcess("P2", 2, 0, 3, 200);
+    kernel.createProcess("P3", 1, 0, 7, 150);
+
+    kernel.run();
+
+    std::cout << "FCFS completed.\n";
+}
+
+void testSJF()
+{
+    std::cout << "\n========== SJF ==========\n";
+
+    SJFScheduler scheduler;
+    Kernel kernel(&scheduler);
+
+    kernel.createProcess("P1", 1, 0, 8, 100);
+    kernel.createProcess("P2", 2, 0, 3, 200);
+    kernel.createProcess("P3", 1, 0, 5, 150);
+
+    kernel.run();
+
+    std::cout << "SJF completed.\n";
+}
+
+void testSRTF()
+{
+    std::cout << "\n========== SRTF ==========\n";
+
+    SRTFScheduler scheduler;
+    Kernel kernel(&scheduler);
+
+    kernel.createProcess("P1", 1, 0, 8, 100);
+    kernel.createProcess("P2", 2, 0, 3, 200);
+    kernel.createProcess("P3", 1, 0, 5, 150);
+
+    kernel.run();
+
+    std::cout << "SRTF completed.\n";
+}
+
+void testRoundRobin()
+{
+    std::cout << "\n====== ROUND ROBIN ======\n";
+
+    RoundRobinScheduler scheduler(3);
+    Kernel kernel(&scheduler);
+
+    kernel.createProcess("P1", 1, 0, 8, 100);
+    kernel.createProcess("P2", 2, 0, 5, 200);
+    kernel.createProcess("P3", 1, 0, 6, 150);
+
+    kernel.run();
+
+    std::cout << "Round Robin completed.\n";
+}
+
+void testPriority()
+{
+    std::cout << "\n======= PRIORITY =======\n";
+
+    PriorityScheduler scheduler;
+    Kernel kernel(&scheduler);
+
+    kernel.createProcess("P1", 3, 0, 5, 100);
+    kernel.createProcess("P2", 1, 0, 3, 200);
+    kernel.createProcess("P3", 2, 0, 7, 150);
+
+    kernel.run();
+
+    std::cout << "Priority completed.\n";
+}
 
 int main()
 {
-    // Fast I/O for pipe streaming
-    std::ios_base::sync_with_stdio(false);
-    std::cin.tie(nullptr);
+    std::cout << "====================================\n";
+    std::cout << "       MINI OS KERNEL TEST\n";
+    std::cout << "====================================\n";
 
-    // Initial setup: 100 MB RAM, Round Robin quantum = 2
-    FirstFit memStrategy;
-    MemoryManager memManager(100, memStrategy);
-    RoundRobinScheduler rrScheduler(2);
-    SimulationEngine engine(memManager, rrScheduler);
+    testFCFS();
+    testSJF();
+    testSRTF();
+    testRoundRobin();
+    testPriority();
 
-    // Preload standard demo processes
-    engine.addProcess("WebBrowser", 2, 0, 6, 30);
-    engine.addProcess("CodeEditor", 1, 0, 4, 25);
-    engine.addProcess("AudioEngine", 3, 1, 3, 20);
-
-    std::string line;
-    while (std::getline(std::cin, line))
-    {
-        if (line.empty()) continue;
-
-        std::istringstream iss(line);
-        std::string command;
-        iss >> command;
-
-        if (command == "STEP")
-        {
-            // Fix Bug 3: always emit telemetry, even when step() returns false
-            // (all-terminated state). The UI needs to know it's done.
-            engine.step();
-            std::cout << engine.getTelemetryJson() << "\n";
-            std::cout.flush();
-        }
-        else if (command == "STATE")
-        {
-            std::cout << engine.getTelemetryJson() << "\n";
-            std::cout.flush();
-        }
-        else if (command == "COMPACT")
-        {
-            memManager.compact();
-            std::cout << engine.getTelemetryJson() << "\n";
-            std::cout.flush();
-        }
-        else if (command == "RESET")
-        {
-            engine.reset();
-            std::cout << engine.getTelemetryJson() << "\n";
-            std::cout.flush();
-        }
-        else if (command == "ADD")
-        {
-            std::string name;
-            int priority, arrivalTime, burstTime, memoryRequired;
-            if (iss >> name >> priority >> arrivalTime >> burstTime >> memoryRequired)
-            {
-                engine.addProcess(name, priority, arrivalTime, burstTime, memoryRequired);
-                std::cout << engine.getTelemetryJson() << "\n";
-                std::cout.flush();
-            }
-            else
-            {
-                std::cerr << "[Engine Error] Invalid ADD syntax. Usage: ADD <name> <priority> <arrival> <burst> <memory>\n";
-                std::cerr.flush();
-            }
-        }
-        else if (command == "EXIT")
-        {
-            break;
-        }
-        else
-        {
-            std::cerr << "[Engine Error] Unknown command: " << command << "\n";
-            std::cerr.flush();
-        }
-    }
+    std::cout << "\n====================================\n";
+    std::cout << "       ALL TESTS COMPLETED\n";
+    std::cout << "====================================\n";
 
     return 0;
 }

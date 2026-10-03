@@ -10,6 +10,7 @@ include_directories(../include)
 
 add_executable(main
     ../src/main.cpp
+    
     ../src/Process.cpp
     ../src/ProcessManager.cpp
     ../src/CPU.cpp
@@ -19,6 +20,8 @@ add_executable(main
     ../src/SRTFScheduler.cpp
     ../src/PriorityScheduler.cpp
     ../src/RoundRobinScheduler.cpp
+
+    ../src/Kernel.cpp
 
     ../src/MemoryBlock.cpp
     ../src/MemoryManager.cpp

@@ -109,7 +109,7 @@ bool SimulationEngine::step()
     checkPendingProcesses();
 
     // 2. Schedule: Ask CPU scheduler for next READY process
-    std::string nextPID = scheduler->selectNextProcess(processManager.getAllProcesses());
+    std::string nextPID = scheduler->selectNextProcess(processManager.getAllProcesses()).PID;
 
     if (nextPID != "INVALID")
     {

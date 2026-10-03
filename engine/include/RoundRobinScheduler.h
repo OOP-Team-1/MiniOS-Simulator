@@ -11,6 +11,6 @@ private:
 
 public:
     RoundRobinScheduler(int timeQuantum);
-    std::string selectNextProcess(const std::vector<Process*>& processes) override;
+    SchedulingDecision selectNextProcess(const std::vector<Process*>& processes) override;
     void reset() override; //reset index and quantum state
 };

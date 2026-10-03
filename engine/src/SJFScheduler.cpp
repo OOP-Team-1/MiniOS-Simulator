@@ -1,6 +1,6 @@
 #include"../include/SJFScheduler.h"
 
-std::string SJFScheduler::selectNextProcess(const std::vector<Process*>& processes)
+SchedulingDecision SJFScheduler::selectNextProcess(const std::vector<Process*>& processes)
 {
     const Process* selectedProcess=NULL;
     for(const Process* process:processes)
@@ -11,6 +11,6 @@ std::string SJFScheduler::selectNextProcess(const std::vector<Process*>& process
             selectedProcess=process;
         }
     }
-    if(!selectedProcess) return "INVALID";
-    return selectedProcess->getPID();
+    if(!selectedProcess) return {"INVALID",-1};
+    return {selectedProcess->getPID(),selectedProcess->getRemainingTime()};
 }
