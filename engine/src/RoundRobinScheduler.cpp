@@ -29,7 +29,7 @@ SchedulingDecision RoundRobinScheduler::selectNextProcess(const std::vector<Proc
                 processes[i]->getState() == "READY")
             {
                 remainingQuantum--;
-                return {currentPID,processes[i]->getRemainingTime()};
+                return {currentPID,timeQuantum};
             }
         }
         // Current process is gone / no longer READY — fall through to pick next
@@ -44,7 +44,7 @@ SchedulingDecision RoundRobinScheduler::selectNextProcess(const std::vector<Proc
         currentIndex = (ind + 1) % n;
         currentPID = processes[ind]->getPID();
         remainingQuantum = timeQuantum - 1; // this tick counts as the first
-        return {currentPID,processes[ind]->getRemainingTime()};
+        return {currentPID,timeQuantum};
     }
 
     // No READY process found
