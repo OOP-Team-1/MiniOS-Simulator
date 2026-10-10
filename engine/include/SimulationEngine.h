@@ -56,6 +56,12 @@ public:
     bool openFile(const std::string& fileId, const std::string& byPID);
     bool closeFile(const std::string& fileId, const std::string& byPID);
 
+    // Content I/O
+    // ok is set to false if the read failed (not found / not open / wrong owner)
+    std::string readFile(const std::string& fileId, const std::string& byPID, bool& ok);
+    bool writeFile(const std::string& fileId, const std::string& byPID, const std::string& content);
+    bool appendFile(const std::string& fileId, const std::string& byPID, const std::string& content);
+
     void setScheduler(Scheduler& newScheduler);
     void setMemoryManager(MemoryManager& newMemoryManager);
 
@@ -73,7 +79,7 @@ public:
 
     void setCurrentSchedulerName(const std::string& name, int quantum);
     void setCurrentAllocName(const std::string& name);
-    
+
     int getCurrentTick() const;
     std::string getTelemetryJson() const;
 };

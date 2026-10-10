@@ -10,7 +10,8 @@ private:
     std::string name;
     std::string ownerPID;
     std::string dirPath;
-    int sizeInBlocks;
+    int sizeInBlocks;    // capacity: number of blocks currently allocated
+    int sizeInBytes;     // logical length: actual bytes of content
     bool open;
     std::vector<int> allocatedBlocks;
     int createdAt;
@@ -30,6 +31,7 @@ public:
     std::string getOwnerPID() const;
     std::string getDirPath() const;
     int getSizeInBlocks() const;
+    int getSizeInBytes() const;
     bool isOpen() const;
     const std::vector<int>& getAllocatedBlocks() const;
     int getCreatedAt() const;
@@ -39,4 +41,5 @@ public:
     void setLastAccessedAt(int tick);
     void setAllocatedBlocks(const std::vector<int>& blocks);
     void setName(const std::string& newName);
+    void setSizeInBytes(int bytes);
 };

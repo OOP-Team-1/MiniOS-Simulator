@@ -96,6 +96,50 @@ bool SimulationEngine::closeFile(const std::string& fileId, const std::string& b
     return ok;
 }
 
+// ── Content I/O wrappers ───────────────────────────────────────────────────
+
+std::string SimulationEngine::readFile(const std::string& fileId, const std::string& byPID, bool& ok)
+{
+    std::string content = fileSystem->readFile(fileId, byPID, currentTick, ok);
+
+    if (ok)
+        log("File read: " + fileId + " by " + byPID +
+            " (" + std::to_string(content.size()) + " bytes)");
+    else
+        log("File read FAILED: " + fileId + " by " + byPID +
+            " (not found, not open, or not held open by this PID)");
+
+    return content;
+}
+
+bool SimulationEngine::writeFile(const std::string& fileId, const std::string& byPID, const std::string& content)
+{
+    bool ok = fileSystem->writeFile(fileId, byPID, content, currentTick);
+
+    if (ok)
+        log("File written: " + fileId + " by " + byPID +
+            " (" + std::to_string(content.size()) + " bytes)");
+    else
+        log("File write FAILED: " + fileId + " by " + byPID +
+            " (not found, not open, not held open by this PID, or disk full)");
+
+    return ok;
+}
+
+bool SimulationEngine::appendFile(const std::string& fileId, const std::string& byPID, const std::string& content)
+{
+    bool ok = fileSystem->appendFile(fileId, byPID, content, currentTick);
+
+    if (ok)
+        log("File appended: " + fileId + " by " + byPID +
+            " (+" + std::to_string(content.size()) + " bytes)");
+    else
+        log("File append FAILED: " + fileId + " by " + byPID +
+            " (not found, not open, not held open by this PID, or disk full)");
+
+    return ok;
+}
+
 void SimulationEngine::compactDisk()
 {
     fileSystem->compact();

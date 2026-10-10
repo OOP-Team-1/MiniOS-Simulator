@@ -1,873 +1,140 @@
-#include <iostream>
-#include <vector>
-#include <string>
-#include <iomanip>
-#include <exception>
+// ============================================================
+// MINI OS SIMULATOR — ENGINE ENTRY POINT
+//
+// This binary is spawned as a long-lived child process by the
+// Node.js backend (see backend/src/engine/processManager.js).
+// It reads newline-terminated commands from stdin, mutates
+// simulation state via SimulationEngine, and writes one JSON
+// line per command to stdout:
+//
+//   - Most commands: the full telemetry snapshot (SimulationEngine::getTelemetryJson())
+//   - FILE_READ:      a one-shot {"type":"READ_RESULT",...} line instead
+//
+// This file intentionally contains no interactive/test code —
+// see git history for the previous manual test harness.
+// ============================================================
 
-#include "../include/Kernel.h"
-#include "../include/RoundRobinScheduler.h"
-#include "../include/MemoryBlock.h"
-#include "../include/FileBlock.h"
-#include "../include/AllocationStrategy.h"
-#include "../include/FileAllocationStrategy.h"
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <memory>
+
+#include "../include/SimulationEngine.h"
+#include "../include/MemoryManager.h"
+#include "../include/FileSystem.h"
+
 #include "../include/FirstFit.h"
 #include "../include/BestFit.h"
 #include "../include/WorstFit.h"
 #include "../include/ContiguousAllocation.h"
 
+#include "../include/FCFSScheduler.h"
+#include "../include/SJFScheduler.h"
+#include "../include/SRTFScheduler.h"
+#include "../include/PriorityScheduler.h"
+#include "../include/RoundRobinScheduler.h"
+
 using namespace std;
 
-
 // ============================================================
-// DISPLAY HELPERS
+// BASE64 (for FILE_WRITE / FILE_APPEND payloads and READ_RESULT content)
 // ============================================================
 
-void printSeparator()
+static const std::string BASE64_CHARS =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789+/";
+
+static std::string base64Encode(const std::string& input)
 {
-    cout << "\n============================================================\n";
-}
+    std::string out;
+    int val = 0, valb = -6;
 
-void printProcessTable(const ProcessManager& manager)
-{
-    cout << "\n---------------- PROCESS TABLE ----------------\n";
-
-    cout << left
-         << setw(8)  << "PID"
-         << setw(15) << "Name"
-         << setw(12) << "State"
-         << setw(10) << "Priority"
-         << setw(10) << "Arrival"
-         << setw(10) << "Burst"
-         << setw(12) << "Remaining"
-         << setw(12) << "Memory"
-         << '\n';
-
-    cout << string(89, '-') << '\n';
-
-    vector<const Process*> processes =
-        manager.getAllProcesses();
-
-    for (const Process* process : processes)
+    for (unsigned char c : input)
     {
-        cout << left
-             << setw(8)  << process->getPID()
-             << setw(15) << process->getName()
-             << setw(12) << process->getState()
-             << setw(10) << process->getPriority()
-             << setw(10) << process->getArrivalTime()
-             << setw(10) << process->getBurstTime()
-             << setw(12) << process->getRemainingTime()
-             << setw(12) << process->getMemoryRequired()
-             << '\n';
-    }
-}
-
-
-// ============================================================
-// TEST 1 : CPU + ROUND ROBIN + CONTIGUOUS MEMORY
-// ============================================================
-
-void testContiguousKernel()
-{
-    printSeparator();
-    cout << "TEST 1: CONTIGUOUS MEMORY + ROUND ROBIN + CPU\n";
-    printSeparator();
-
-    // Use the actual concrete allocation strategies
-    FirstFit memoryStrategy;
-    ContiguousAllocation fileStrategy;
-
-    // --------------------------------------------------------
-    // MEMORY MANAGER
-    // --------------------------------------------------------
-
-    MemoryManager memoryManager(
-        128,
-        memoryStrategy
-    );
-
-    // --------------------------------------------------------
-    // FILE SYSTEM
-    // 32 blocks, each 4 KB
-    // --------------------------------------------------------
-
-    FileSystem fileSystem(
-        32,
-        4,
-        fileStrategy
-    );
-
-    // --------------------------------------------------------
-    // PAGING MANAGER
-    // Not used in contiguous mode, but Kernel requires it
-    // --------------------------------------------------------
-
-    PagingManager pagingManager(
-        32,
-        4,
-        ReplacementPolicy::LRU
-    );
-
-    // --------------------------------------------------------
-    // ROUND ROBIN
-    // --------------------------------------------------------
-
-    RoundRobinScheduler scheduler(2);
-
-    // --------------------------------------------------------
-    // KERNEL
-    // --------------------------------------------------------
-
-    Kernel kernel(
-        scheduler,
-        memoryManager,
-        fileSystem,
-        pagingManager,
-        MemoryMode::CONTIGUOUS
-    );
-
-
-    // --------------------------------------------------------
-    // CREATE PROCESSES
-    // --------------------------------------------------------
-
-    cout << "\nCreating processes...\n";
-
-    Process& p1 =
-        kernel.createProcess(
-            "Editor",
-            3,
-            0,
-            5,
-            30
-        );
-
-    Process& p2 =
-        kernel.createProcess(
-            "Browser",
-            1,
-            0,
-            4,
-            40
-        );
-
-    Process& p3 =
-        kernel.createProcess(
-            "Compiler",
-            2,
-            3,
-            6,
-            20
-        );
-
-    cout << "Created: " << p1.getPID() << '\n';
-    cout << "Created: " << p2.getPID() << '\n';
-    cout << "Created: " << p3.getPID() << '\n';
-
-
-    // --------------------------------------------------------
-    // PROCESS TABLE BEFORE EXECUTION
-    // --------------------------------------------------------
-
-    printProcessTable(
-        kernel.getProcessManager()
-    );
-
-
-    // --------------------------------------------------------
-    // MEMORY TEST
-    // --------------------------------------------------------
-
-    cout << "\nInitial memory state:\n";
-
-    memoryManager.displayMemory();
-
-
-    // --------------------------------------------------------
-    // FILE SYSTEM TEST
-    // --------------------------------------------------------
-
-    cout << "\nCreating files owned by processes...\n";
-
-    string file1 =
-        fileSystem.createFile(
-            p1.getPID(),
-            "editor.txt",
-            3,
-            kernel.getCurrentTime()
-        );
-
-    string file2 =
-        fileSystem.createFile(
-            p2.getPID(),
-            "browser.cache",
-            4,
-            kernel.getCurrentTime()
-        );
-
-    cout << "File for "
-         << p1.getPID()
-         << ": "
-         << file1
-         << '\n';
-
-    cout << "File for "
-         << p2.getPID()
-         << ": "
-         << file2
-         << '\n';
-
-
-    // --------------------------------------------------------
-    // OPEN FILE
-    // --------------------------------------------------------
-
-    cout << "\nOpening " << file1 << "...\n";
-
-    bool opened =
-        fileSystem.openFile(
-            file1,
-            p1.getPID(),
-            kernel.getCurrentTime()
-        );
-
-    cout << "Open result: "
-         << (opened ? "SUCCESS" : "FAILED")
-         << '\n';
-
-
-    // --------------------------------------------------------
-    // RENAME FILE
-    // --------------------------------------------------------
-
-    cout << "\nRenaming " << file1 << "...\n";
-
-    bool renamed =
-        fileSystem.renameFile(
-            file1,
-            "project.txt"
-        );
-
-    cout << "Rename result: "
-         << (renamed ? "SUCCESS" : "FAILED")
-         << '\n';
-
-
-    // --------------------------------------------------------
-    // FILE SYSTEM SNAPSHOT
-    // --------------------------------------------------------
-
-    cout << "\nFile system snapshot:\n";
-
-    cout << fileSystem.getSnapshotAsJson()
-         << '\n';
-
-
-    // --------------------------------------------------------
-    // RUN KERNEL STEP BY STEP
-    // --------------------------------------------------------
-
-    cout << "\nRunning kernel step-by-step...\n";
-
-    int step = 1;
-
-    while (kernel.runStep())
-    {
-        cout << "\n---------------- STEP "
-             << step++
-             << " ----------------\n";
-
-        cout << "Kernel time: "
-             << kernel.getCurrentTime()
-             << '\n';
-
-        Process* current =
-            kernel.getCurrentProcess();
-
-        if (current != nullptr)
+        val = (val << 8) + c;
+        valb += 8;
+        while (valb >= 0)
         {
-            cout << "CPU process: "
-                 << current->getPID()
-                 << '\n';
-        }
-        else
-        {
-            cout << "CPU process: IDLE\n";
-        }
-
-        printProcessTable(
-            kernel.getProcessManager()
-        );
-
-        cout << "\nMemory:\n";
-
-        memoryManager.displayMemory();
-
-        // Safety guard
-        if (step > 100)
-        {
-            cout << "\nERROR: Too many kernel steps.\n";
-            break;
+            out.push_back(BASE64_CHARS[(val >> valb) & 0x3F]);
+            valb -= 6;
         }
     }
 
+    if (valb > -6)
+    {
+        out.push_back(BASE64_CHARS[((val << 8) >> (valb + 8)) & 0x3F]);
+    }
 
-    // --------------------------------------------------------
-    // FINAL STATE
-    // --------------------------------------------------------
+    while (out.size() % 4)
+    {
+        out.push_back('=');
+    }
 
-    cout << "\n\nFINAL CONTIGUOUS-MEMORY STATE\n";
-
-    printProcessTable(
-        kernel.getProcessManager()
-    );
-
-    cout << "\nMemory after all processes:\n";
-
-    memoryManager.displayMemory();
-
-    cout << "\nFile system after process termination:\n";
-
-    cout << fileSystem.getSnapshotAsJson()
-         << '\n';
-
-    cout << "\nKernel time = "
-         << kernel.getCurrentTime()
-         << '\n';
+    return out;
 }
 
-
-// ============================================================
-// TEST 2 : PAGING
-// ============================================================
-
-void testPaging()
+static std::string base64Decode(const std::string& input)
 {
-    printSeparator();
-    cout << "TEST 2: PAGING + PAGE TABLE + PAGE FAULTS\n";
-    printSeparator();
-
-    FirstFit memoryStrategy;
-    ContiguousAllocation fileStrategy;
-
-    // --------------------------------------------------------
-    // Required by Kernel but not actually used for paging
-    // --------------------------------------------------------
-
-    MemoryManager memoryManager(
-        128,
-        memoryStrategy
-    );
-
-    FileSystem fileSystem(
-        32,
-        4,
-        fileStrategy
-    );
-
-    // --------------------------------------------------------
-    // PAGING
-    //
-    // 16 KB physical RAM
-    // 4 KB page size
-    // => 4 physical frames
-    // --------------------------------------------------------
-
-    PagingManager pagingManager(
-        16,
-        4,
-        ReplacementPolicy::LRU
-    );
-
-    RoundRobinScheduler scheduler(2);
-
-    Kernel kernel(
-        scheduler,
-        memoryManager,
-        fileSystem,
-        pagingManager,
-        MemoryMode::PAGING
-    );
-
-
-    // --------------------------------------------------------
-    // CREATE LARGE PROCESS
-    // --------------------------------------------------------
-
-    cout << "\nCreating large process...\n";
-
-    Process& process =
-        kernel.createProcess(
-            "LargeProcess",
-            1,
-            0,
-            5,
-            24
-        );
-
-    cout << "PID: "
-         << process.getPID()
-         << '\n';
-
-    cout << "Logical memory: "
-         << process.getMemoryRequired()
-         << " KB\n";
-
-    cout << "Physical frames: "
-         << pagingManager.getTotalFrames()
-         << '\n';
-
-
-    // --------------------------------------------------------
-    // INITIAL PAGING STATE
-    // --------------------------------------------------------
-
-    cout << "\nInitial paging state:\n";
-
-    pagingManager.displayState();
-
-
-    // --------------------------------------------------------
-    // ADDRESS TRANSLATION
-    // --------------------------------------------------------
-
-    cout << "\n\nTesting address translation...\n";
-
-    int address1 = 2;
-    int address2 = 6;
-    int address3 = 10;
-    int address4 = 14;
-    int address5 = 18;
-
-
-    AddressTranslationResult r1 =
-        pagingManager.accessAddress(
-            process.getPID(),
-            address1,
-            1
-        );
-
-    cout << "\nAddress "
-         << address1
-         << ": "
-         << r1.message
-         << '\n';
-
-    cout << "Page Fault: "
-         << (r1.pageFault ? "YES" : "NO")
-         << '\n';
-
-    cout << "Physical Address: "
-         << r1.physicalAddress
-         << '\n';
-
-
-    AddressTranslationResult r2 =
-        pagingManager.accessAddress(
-            process.getPID(),
-            address2,
-            2
-        );
-
-    cout << "\nAddress "
-         << address2
-         << ": "
-         << r2.message
-         << '\n';
-
-    cout << "Page Fault: "
-         << (r2.pageFault ? "YES" : "NO")
-         << '\n';
-
-    cout << "Physical Address: "
-         << r2.physicalAddress
-         << '\n';
-
-
-    AddressTranslationResult r3 =
-        pagingManager.accessAddress(
-            process.getPID(),
-            address3,
-            3
-        );
-
-    cout << "\nAddress "
-         << address3
-         << ": "
-         << r3.message
-         << '\n';
-
-    cout << "Page Fault: "
-         << (r3.pageFault ? "YES" : "NO")
-         << '\n';
-
-    cout << "Physical Address: "
-         << r3.physicalAddress
-         << '\n';
-
-
-    AddressTranslationResult r4 =
-        pagingManager.accessAddress(
-            process.getPID(),
-            address4,
-            4
-        );
-
-    cout << "\nAddress "
-         << address4
-         << ": "
-         << r4.message
-         << '\n';
-
-    cout << "Page Fault: "
-         << (r4.pageFault ? "YES" : "NO")
-         << '\n';
-
-    cout << "Physical Address: "
-         << r4.physicalAddress
-         << '\n';
-
-
-    // --------------------------------------------------------
-    // PAGE FAULT TEST
-    //
-    // Address 18 belongs to page 4
-    // --------------------------------------------------------
-
-    AddressTranslationResult r5 =
-        pagingManager.accessAddress(
-            process.getPID(),
-            address5,
-            5
-        );
-
-    cout << "\nAddress "
-         << address5
-         << ": "
-         << r5.message
-         << '\n';
-
-    cout << "Page Fault: "
-         << (r5.pageFault ? "YES" : "NO")
-         << '\n';
-
-    cout << "Physical Address: "
-         << r5.physicalAddress
-         << '\n';
-
-
-    // --------------------------------------------------------
-    // INVALID ADDRESS TEST
-    // --------------------------------------------------------
-
-    AddressTranslationResult invalid =
-        pagingManager.accessAddress(
-            process.getPID(),
-            100,
-            6
-        );
-
-    cout << "\nInvalid address test:\n";
-
-    cout << invalid.message
-         << '\n';
-
-
-    // --------------------------------------------------------
-    // PAGING STATE AFTER ACCESSES
-    // --------------------------------------------------------
-
-    cout << "\nPaging state after address accesses:\n";
-
-    pagingManager.displayState();
-
-    cout << "\nTotal page faults: "
-         << pagingManager.getPageFaultCount()
-         << '\n';
-
-
-    // --------------------------------------------------------
-    // TERMINATE PROCESS
-    // --------------------------------------------------------
-
-    cout << "\nTerminating process...\n";
-
-    bool terminated =
-        kernel.terminateProcess(
-            process.getPID()
-        );
-
-    cout << "Termination result: "
-         << (terminated ? "SUCCESS" : "FAILED")
-         << '\n';
-
-
-    cout << "\nPaging state after termination:\n";
-
-    pagingManager.displayState();
+    std::vector<int> table(256, -1);
+    for (int i = 0; i < 64; i++)
+    {
+        table[static_cast<unsigned char>(BASE64_CHARS[i])] = i;
+    }
+
+    std::string out;
+    int val = 0, valb = -8;
+
+    for (unsigned char c : input)
+    {
+        if (table[c] == -1) break; // stop at padding '=' or invalid char
+        val = (val << 6) + table[c];
+        valb += 6;
+        if (valb >= 0)
+        {
+            out.push_back(static_cast<char>((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+
+    return out;
 }
 
-
-// ============================================================
-// TEST 3 : MEMORY MANAGER
-// ============================================================
-
-void testMemoryManager()
+static std::string jsonEscape(const std::string& s)
 {
-    printSeparator();
-    cout << "TEST 3: MEMORY MANAGER\n";
-    printSeparator();
-
-    FirstFit strategy;
-
-    MemoryManager memory(
-        100,
-        strategy
-    );
-
-    cout << "\nInitial:\n";
-
-    memory.displayMemory();
-
-
-    // --------------------------------------------------------
-    // ALLOCATIONS
-    // --------------------------------------------------------
-
-    cout << "\nAllocating P1 = 20 MB\n";
-
-    cout << memory.allocate(
-        "P1",
-        20
-    ) << '\n';
-
-
-    cout << "\nAllocating P2 = 30 MB\n";
-
-    cout << memory.allocate(
-        "P2",
-        30
-    ) << '\n';
-
-
-    cout << "\nAllocating P3 = 10 MB\n";
-
-    cout << memory.allocate(
-        "P3",
-        10
-    ) << '\n';
-
-
-    memory.displayMemory();
-
-
-    // --------------------------------------------------------
-    // DEALLOCATE MIDDLE BLOCK
-    // --------------------------------------------------------
-
-    cout << "\nDeallocating P2...\n";
-
-    memory.deallocate("P2");
-
-    memory.displayMemory();
-
-
-    cout << "\nExternal fragmentation: "
-         << fixed
-         << setprecision(2)
-         << memory.getExternalFragmentation()
-         << "%\n";
-
-
-    // --------------------------------------------------------
-    // COMPACTION
-    // --------------------------------------------------------
-
-    cout << "\nCompacting memory...\n";
-
-    memory.compact();
-
-    memory.displayMemory();
-
-
-    // --------------------------------------------------------
-    // JSON SNAPSHOT
-    // --------------------------------------------------------
-
-    cout << "\nMemory JSON snapshot:\n";
-
-    cout << memory.getSnapshotAsJson()
-         << '\n';
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s)
+    {
+        switch (c)
+        {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:   out += c;      break;
+        }
+    }
+    return out;
 }
 
-
 // ============================================================
-// TEST 4 : FILE SYSTEM
+// COMMAND TOKENIZER
 // ============================================================
 
-void testFileSystem()
+static std::vector<std::string> tokenize(const std::string& line)
 {
-    printSeparator();
-    cout << "TEST 4: FILE SYSTEM\n";
-    printSeparator();
-
-    ContiguousAllocation strategy;
-
-    FileSystem fs(
-        16,
-        4,
-        strategy
-    );
-
-
-    // --------------------------------------------------------
-    // CREATE FILES
-    // --------------------------------------------------------
-
-    string f1 =
-        fs.createFile(
-            "P1",
-            "notes.txt",
-            3,
-            0
-        );
-
-    string f2 =
-        fs.createFile(
-            "P2",
-            "program.cpp",
-            4,
-            1
-        );
-
-
-    cout << "\nCreated files:\n";
-
-    cout << f1 << '\n';
-    cout << f2 << '\n';
-
-
-    // --------------------------------------------------------
-    // OPEN
-    // --------------------------------------------------------
-
-    cout << "\nOpening f1...\n";
-
-    cout << (
-        fs.openFile(
-            f1,
-            "P1",
-            2
-        )
-        ? "SUCCESS"
-        : "FAILED"
-    ) << '\n';
-
-
-    // --------------------------------------------------------
-    // DUPLICATE OPEN
-    // --------------------------------------------------------
-
-    cout << "\nOpening f1 again...\n";
-
-    cout << (
-        fs.openFile(
-            f1,
-            "P1",
-            3
-        )
-        ? "SUCCESS"
-        : "CORRECTLY REJECTED"
-    ) << '\n';
-
-
-    // --------------------------------------------------------
-    // CLOSE
-    // --------------------------------------------------------
-
-    cout << "\nClosing f1...\n";
-
-    cout << (
-        fs.closeFile(
-            f1,
-            "P1"
-        )
-        ? "SUCCESS"
-        : "FAILED"
-    ) << '\n';
-
-
-    // --------------------------------------------------------
-    // RENAME
-    // --------------------------------------------------------
-
-    cout << "\nRenaming f2...\n";
-
-    cout << (
-        fs.renameFile(
-            f2,
-            "main.cpp"
-        )
-        ? "SUCCESS"
-        : "FAILED"
-    ) << '\n';
-
-
-    // --------------------------------------------------------
-    // SNAPSHOT
-    // --------------------------------------------------------
-
-    cout << "\nFile system snapshot:\n";
-
-    cout << fs.getSnapshotAsJson()
-         << '\n';
-
-
-    // --------------------------------------------------------
-    // PROCESS TERMINATION CLEANUP
-    // --------------------------------------------------------
-
-    cout << "\nSimulating termination of P2...\n";
-
-    fs.handleProcessTermination("P2");
-
-    cout << "\nFile system after P2 termination:\n";
-
-    cout << fs.getSnapshotAsJson()
-         << '\n';
+    std::vector<std::string> tokens;
+    std::istringstream iss(line);
+    std::string tok;
+    while (iss >> tok)
+    {
+        tokens.push_back(tok);
+    }
+    return tokens;
 }
-
-
-// ============================================================
-// TEST 5 : ALLOCATION STRATEGIES
-// ============================================================
-
-void testAllocationStrategies()
-{
-    printSeparator();
-    cout << "TEST 5: MEMORY ALLOCATION STRATEGIES\n";
-    printSeparator();
-
-    FirstFit firstFit;
-    BestFit bestFit;
-    WorstFit worstFit;
-
-    vector<MemoryBlock> blocks;
-
-    // Make a few blocks manually.
-    // The exact constructor must match your MemoryBlock class.
-    // This test is intentionally omitted from execution below
-    // because MemoryBlock constructor details may vary.
-    
-    cout << "\nAvailable concrete strategies:\n";
-    cout << "First Fit  : READY\n";
-    cout << "Best Fit   : READY\n";
-    cout << "Worst Fit  : READY\n";
-
-    cout << "\nThese strategies can now be passed directly to "
-         << "MemoryManager.\n";
-}
-
 
 // ============================================================
 // MAIN
@@ -875,74 +142,223 @@ void testAllocationStrategies()
 
 int main()
 {
-    cout << "\n";
-    cout << "############################################################\n";
-    cout << "#                  MINI OS SIMULATOR                       #\n";
-    cout << "#                   KERNEL TEST                            #\n";
-    cout << "############################################################\n";
+    // ------------------------------------------------------
+    // Concrete strategy instances. We keep one of each alive
+    // for the whole process lifetime and just repoint which
+    // one is active via setStrategy()/setScheduler().
+    // ------------------------------------------------------
 
+    FirstFit firstFit;
+    BestFit bestFit;
+    WorstFit worstFit;
+    ContiguousAllocation fileStrategy;
 
-    try
+    FCFSScheduler fcfs;
+    SJFScheduler sjf;
+    SRTFScheduler srtf;
+    PriorityScheduler priority;
+    RoundRobinScheduler roundRobin(2); // default quantum = 2
+
+    // ------------------------------------------------------
+    // Core managers — fixed configuration at startup.
+    // (100 MB RAM, FirstFit; 32 blocks x 4 KB disk, Contiguous)
+    // ------------------------------------------------------
+
+    MemoryManager memoryManager(100, firstFit);
+    FileSystem fileSystem(32, 4, fileStrategy, "data/disk.img");
+
+    SimulationEngine engine(memoryManager, fileSystem, roundRobin);
+    engine.setCurrentSchedulerName("RR", 2);
+    engine.setCurrentAllocName("FirstFit");
+
+    // ------------------------------------------------------
+    // COMMAND LOOP
+    // ------------------------------------------------------
+
+    std::string line;
+
+    while (std::getline(std::cin, line))
     {
-        // ====================================================
-        // TEST MEMORY MANAGER
-        // ====================================================
+        if (line.empty()) continue;
 
-        testMemoryManager();
+        std::vector<std::string> tok = tokenize(line);
+        if (tok.empty()) continue;
 
+        const std::string& cmd = tok[0];
+        bool emitTelemetry = true; // most commands fall through to a telemetry print
 
-        // ====================================================
-        // TEST FILE SYSTEM
-        // ====================================================
+        try
+        {
+            if (cmd == "EXIT")
+            {
+                break;
+            }
+            else if (cmd == "STEP")
+            {
+                engine.step();
+            }
+            else if (cmd == "STATE")
+            {
+                // no-op mutation — just fall through and print current telemetry
+            }
+            else if (cmd == "RESET")
+            {
+                engine.reset();
+            }
+            else if (cmd == "COMPACT")
+            {
+                memoryManager.compact();
+            }
+            else if (cmd == "DISK_COMPACT")
+            {
+                engine.compactDisk();
+            }
+            else if (cmd == "ADD" && tok.size() >= 6)
+            {
+                // ADD <name> <priority> <arrival> <burst> <memory>
+                engine.addProcess(
+                    tok[1],
+                    std::stoi(tok[2]),
+                    std::stoi(tok[3]),
+                    std::stoi(tok[4]),
+                    std::stoi(tok[5])
+                );
+            }
+            else if (cmd == "SET_SCHEDULER" && tok.size() >= 2)
+            {
+                // SET_SCHEDULER <FCFS|SJF|SRTF|PRIORITY|RR> [quantum]
+                const std::string& type = tok[1];
 
-        testFileSystem();
+                if (type == "FCFS")
+                {
+                    engine.setScheduler(fcfs);
+                    engine.setCurrentSchedulerName("FCFS", 0);
+                }
+                else if (type == "SJF")
+                {
+                    engine.setScheduler(sjf);
+                    engine.setCurrentSchedulerName("SJF", 0);
+                }
+                else if (type == "SRTF")
+                {
+                    engine.setScheduler(srtf);
+                    engine.setCurrentSchedulerName("SRTF", 0);
+                }
+                else if (type == "PRIORITY")
+                {
+                    engine.setScheduler(priority);
+                    engine.setCurrentSchedulerName("PRIORITY", 0);
+                }
+                else if (type == "RR")
+                {
+                    int quantum = (tok.size() >= 3) ? std::stoi(tok[2]) : 2;
+                    roundRobin = RoundRobinScheduler(quantum);
+                    engine.setScheduler(roundRobin);
+                    engine.setCurrentSchedulerName("RR", quantum);
+                }
+            }
+            else if (cmd == "SET_ALLOC" && tok.size() >= 2)
+            {
+                // SET_ALLOC <FirstFit|BestFit|WorstFit>
+                const std::string& type = tok[1];
 
+                if (type == "FirstFit")
+                {
+                    memoryManager.setStrategy(firstFit);
+                    engine.setCurrentAllocName("FirstFit");
+                }
+                else if (type == "BestFit")
+                {
+                    memoryManager.setStrategy(bestFit);
+                    engine.setCurrentAllocName("BestFit");
+                }
+                else if (type == "WorstFit")
+                {
+                    memoryManager.setStrategy(worstFit);
+                    engine.setCurrentAllocName("WorstFit");
+                }
+            }
+            else if (cmd == "FILE_CREATE" && tok.size() >= 4)
+            {
+                // FILE_CREATE <ownerPID> <name> <sizeInBlocks> [dirPath]
+                std::string dirPath = (tok.size() >= 5) ? tok[4] : "/";
+                engine.createFile(tok[1], tok[2], std::stoi(tok[3]), dirPath);
+            }
+            else if (cmd == "FILE_DELETE" && tok.size() >= 2)
+            {
+                engine.deleteFile(tok[1]);
+            }
+            else if (cmd == "FILE_OPEN" && tok.size() >= 3)
+            {
+                engine.openFile(tok[1], tok[2]);
+            }
+            else if (cmd == "FILE_CLOSE" && tok.size() >= 3)
+            {
+                engine.closeFile(tok[1], tok[2]);
+            }
+            else if (cmd == "FILE_RENAME" && tok.size() >= 3)
+            {
+                engine.renameFile(tok[1], tok[2]);
+            }
+            else if (cmd == "FILE_READ" && tok.size() >= 3)
+            {
+                // FILE_READ <fileId> <byPID>
+                // Emits a dedicated READ_RESULT line instead of telemetry.
+                bool ok = false;
+                std::string content = engine.readFile(tok[1], tok[2], ok);
 
-        // ====================================================
-        // TEST CONTIGUOUS KERNEL
-        // ====================================================
+                std::ostringstream ss;
+                ss << "{\"type\":\"READ_RESULT\","
+                   << "\"fileId\":\"" << jsonEscape(tok[1]) << "\","
+                   << "\"pid\":\"" << jsonEscape(tok[2]) << "\","
+                   << "\"ok\":" << (ok ? "true" : "false") << ",";
 
-        testContiguousKernel();
+                if (ok)
+                {
+                    ss << "\"content\":\"" << base64Encode(content) << "\"";
+                }
+                else
+                {
+                    ss << "\"content\":null";
+                }
 
+                ss << "}";
 
-        // ====================================================
-        // TEST PAGING
-        // ====================================================
+                std::cout << ss.str() << std::endl;
+                emitTelemetry = false;
+            }
+            else if (cmd == "FILE_WRITE" && tok.size() >= 3)
+            {
+                // FILE_WRITE <fileId> <byPID> <base64Content>
+                std::string content = (tok.size() >= 4) ? base64Decode(tok[3]) : "";
+                engine.writeFile(tok[1], tok[2], content);
+            }
+            else if (cmd == "FILE_APPEND" && tok.size() >= 4)
+            {
+                // FILE_APPEND <fileId> <byPID> <base64Content>
+                std::string content = base64Decode(tok[3]);
+                engine.appendFile(tok[1], tok[2], content);
+            }
+            else
+            {
+                // Unknown or malformed command — ignore, still emit telemetry
+                // so the frontend's state doesn't silently go stale.
+            }
+        }
+        catch (const std::exception& e)
+        {
+            // Never let a bad command kill the engine process — report via
+            // stdout as a structured error line, then keep the loop alive.
+            std::ostringstream ss;
+            ss << "{\"type\":\"ERROR\",\"message\":\"" << jsonEscape(e.what()) << "\"}";
+            std::cout << ss.str() << std::endl;
+            emitTelemetry = false;
+        }
 
-        testPaging();
-
-
-        // ====================================================
-        // TEST ALLOCATION STRATEGIES
-        // ====================================================
-
-        testAllocationStrategies();
-
-
-        // ====================================================
-        // ALL TESTS FINISHED
-        // ====================================================
-
-        printSeparator();
-
-        cout << "ALL TESTS COMPLETED.\n";
-
-        printSeparator();
-    }
-    catch (const exception& e)
-    {
-        cout << "\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n";
-        cout << "TEST FAILED\n";
-        cout << "Reason: " << e.what() << '\n';
-        cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n";
-
-        return 1;
-    }
-    catch (...)
-    {
-        cout << "\nUNKNOWN ERROR OCCURRED.\n";
-
-        return 1;
+        if (emitTelemetry)
+        {
+            std::cout << engine.getTelemetryJson() << std::endl;
+        }
     }
 
     return 0;

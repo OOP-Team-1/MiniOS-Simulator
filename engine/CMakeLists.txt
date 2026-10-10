@@ -36,4 +36,6 @@ add_executable(main
     ../src/File.cpp
     ../src/ContiguousAllocation.cpp
     ../src/FileSystem.cpp
+
+    ../src/DiskStorage.cpp
 )
