@@ -53,6 +53,15 @@ export function registerSocketEvents(io) {
                 sendCommand(`ADD ${safeName} ${p} ${a} ${b} ${m}`);
             }
         });
+        // ── Process termination ───────────────────────────────────────────────
+        socket.on('cmd:kill_process', (data) => {
+            // Strip out weird characters for safety, leaving just the PID (like '0P1')
+            const safePID = String(data.pid).replace(/[^a-zA-Z0-9_-]/g, '');
+            if (safePID) {
+                // Forward the kill command to the C++ Engine's standard input
+                sendCommand(`KILL ${safePID}`);
+            }
+        });
 
         // ── File system operations ────────────────────────────────────────────
         // data: { ownerPID, name, sizeInBlocks, dirPath? }
