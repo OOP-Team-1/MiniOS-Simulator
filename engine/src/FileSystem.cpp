@@ -2,8 +2,9 @@
 
 #include <sstream>
 #include <algorithm>
+#include <cmath>
 
-FileSystem::FileSystem(int totalBlocks, int blockSize, FileAllocationStrategy& strategy)
+FileSystem::FileSystem(int totalBlocks, int blockSize, FileAllocationStrategy& strategy, const std::string& diskImagePath)
 {
     this->totalBlocks = totalBlocks;
     this->blockSize = blockSize;
@@ -14,6 +15,8 @@ FileSystem::FileSystem(int totalBlocks, int blockSize, FileAllocationStrategy& s
     {
         blocks.emplace_back(i);
     }
+
+    this->disk = std::make_unique<DiskStorage>(diskImagePath, totalBlocks, blockSize);
 }
 
 File* FileSystem::findFile(const std::string& fileId)
@@ -24,6 +27,24 @@ File* FileSystem::findFile(const std::string& fileId)
             return f.get();
     }
     return nullptr;
+}
+
+bool FileSystem::isOpenedBy(const std::string& fileId, const std::string& pid) const
+{
+    for (const auto& e : openFileTable)
+    {
+        if (e.fileId == fileId && e.pid == pid)
+            return true;
+    }
+    return false;
+}
+
+void FileSystem::freeBlocks(const std::vector<int>& blockIds)
+{
+    for (int blockId : blockIds)
+    {
+        blocks[blockId].deallocate();
+    }
 }
 
 std::string FileSystem::createFile(const std::string& ownerPID,
@@ -64,11 +85,10 @@ bool FileSystem::deleteFile(const std::string& fileId)
         openFileTable.end()
     );
 
-    // Free all its disk blocks
-    for (int blockId : file->getAllocatedBlocks())
-    {
-        blocks[blockId].deallocate();
-    }
+    // Free all its disk blocks (note: underlying bytes on disk.img are
+    // left as-is — they become garbage until the next allocation
+    // overwrites them, same as a real filesystem)
+    freeBlocks(file->getAllocatedBlocks());
 
     // Remove the file entry
     files.erase(
@@ -84,6 +104,9 @@ bool FileSystem::openFile(const std::string& fileId, const std::string& byPID, i
 {
     File* file = findFile(fileId);
     if (!file) return false;
+    
+    if (file->getOwnerPID() != byPID) return false;
+
     if (file->isOpen()) return false;  // Already open
 
     file->setOpen(true);
@@ -118,18 +141,188 @@ bool FileSystem::renameFile(const std::string& fileId, const std::string& newNam
     return true;
 }
 
+// ============================================================
+// CONTENT I/O
+// ============================================================
+
+std::string FileSystem::readFile(const std::string& fileId, const std::string& byPID, int currentTick, bool& ok)
+{
+    ok = false;
+
+    File* file = findFile(fileId);
+    if (!file) return "";
+    if (!file->isOpen()) return "";
+    if (!isOpenedBy(fileId, byPID)) return "";
+
+    const std::vector<int>& blockIds = file->getAllocatedBlocks();
+
+    std::string content;
+    content.reserve(static_cast<std::size_t>(file->getSizeInBytes()));
+
+    for (int blockId : blockIds)
+    {
+        std::vector<char> raw = disk->readBlock(blockId);
+        content.append(raw.data(), raw.size());
+    }
+
+    // Trim to the logical length — last block is generally only
+    // partially used, and raw block data beyond that is padding/garbage.
+    if (static_cast<int>(content.size()) > file->getSizeInBytes())
+    {
+        content.resize(static_cast<std::size_t>(file->getSizeInBytes()));
+    }
+
+    file->setLastAccessedAt(currentTick);
+    ok = true;
+    return content;
+}
+
+bool FileSystem::writeFile(const std::string& fileId, const std::string& byPID, const std::string& content, int currentTick)
+{
+    File* file = findFile(fileId);
+    if (!file) return false;
+    if (!file->isOpen()) return false;
+    if (!isOpenedBy(fileId, byPID)) return false;
+
+    int blocksNeeded = static_cast<int>(
+        std::ceil(static_cast<double>(content.size()) / blockSize)
+    );
+    if (blocksNeeded == 0) blocksNeeded = 1;
+
+    const std::vector<int>& currentBlocks = file->getAllocatedBlocks();
+    int currentCount = static_cast<int>(currentBlocks.size());
+
+    std::vector<int> finalBlocks;
+
+    if (blocksNeeded <= currentCount)
+    {
+        // Shrinking or keeping the same size: keep the first blocksNeeded blocks
+        finalBlocks.assign(currentBlocks.begin(), currentBlocks.begin() + blocksNeeded);
+        std::vector<int> toFree(currentBlocks.begin() + blocksNeeded, currentBlocks.end());
+        freeBlocks(toFree);
+    }
+    else
+    {
+        int extraNeeded = blocksNeeded - currentCount;
+        int lastBlock = currentBlocks.back();
+
+        // 1. Check if we can expand in-place (adjacent blocks are free)
+        bool canExpandInPlace = true;
+        if (lastBlock + extraNeeded >= totalBlocks)
+        {
+            canExpandInPlace = false;
+        }
+        else
+        {
+            for (int i = 1; i <= extraNeeded; i++)
+            {
+                if (!blocks[lastBlock + i].isFree())
+                {
+                    canExpandInPlace = false;
+                    break;
+                }
+            }
+        }
+
+        if (canExpandInPlace)
+        {
+            finalBlocks = currentBlocks;
+            for (int i = 1; i <= extraNeeded; i++)
+            {
+                int bId = lastBlock + i;
+                blocks[bId].allocate(fileId);
+                finalBlocks.push_back(bId);
+            }
+        }
+        else
+        {
+            // 2. In-place failed: relocate the entire file to a new contiguous run
+            // Temporarily release old blocks so they count as free space for findBlocks
+            freeBlocks(currentBlocks);
+
+            std::vector<int> candidateBlocks = strategy->findBlocks(blocks, blocksNeeded);
+
+            if (static_cast<int>(candidateBlocks.size()) < blocksNeeded)
+            {
+                // Not enough contiguous space: roll back and keep original blocks intact
+                for (int bId : currentBlocks)
+                {
+                    blocks[bId].allocate(fileId);
+                }
+                return false;
+            }
+
+            // Allocate the new contiguous block region
+            for (int bId : candidateBlocks)
+            {
+                blocks[bId].allocate(fileId);
+            }
+            finalBlocks = candidateBlocks;
+        }
+    }
+
+    // Write content across finalBlocks, blockSize bytes at a time
+    std::size_t offset = 0;
+    for (int blockId : finalBlocks)
+    {
+        std::size_t remaining = content.size() - offset;
+        std::size_t chunkLen = remaining < static_cast<std::size_t>(blockSize)
+            ? remaining
+            : static_cast<std::size_t>(blockSize);
+
+        std::vector<char> chunk(content.begin() + offset, content.begin() + offset + chunkLen);
+        disk->writeBlock(blockId, chunk);
+
+        offset += chunkLen;
+    }
+
+    file->setAllocatedBlocks(finalBlocks);
+    file->setSizeInBytes(static_cast<int>(content.size()));
+    file->setLastAccessedAt(currentTick);
+
+    return true;
+}
+
+bool FileSystem::appendFile(const std::string& fileId, const std::string& byPID, const std::string& content, int currentTick)
+{
+    File* file = findFile(fileId);
+    if (!file) return false;
+    if (!file->isOpen()) return false;
+    if (!isOpenedBy(fileId, byPID)) return false;
+    if (content.empty()) return true; // nothing to do, trivially succeeds
+
+    bool readOk = false;
+    std::string existing = readFile(fileId, byPID, currentTick, readOk);
+    if (!readOk) return false;
+
+    std::string combined = existing + content;
+
+    // Delegate to writeFile, which already handles growth/shrink/allocation.
+    return writeFile(fileId, byPID, combined, currentTick);
+}
+
+// ============================================================
+// PROCESS / SYSTEM
+// ============================================================
+
 void FileSystem::handleProcessTermination(const std::string& pid)
 {
+    std::vector<std::string> toClose;
+    for (const auto& entry : openFileTable) {
+        if (entry.pid == pid) toClose.push_back(entry.fileId);
+    }
+    for (const auto& fileId : toClose) {
+        closeFile(fileId, pid);
+    }
+
     // Collect fileIds owned by this process
     std::vector<std::string> toDelete;
-    for (const auto& f : files)
-    {
+    for (const auto& f : files){
         if (f->getOwnerPID() == pid)
             toDelete.push_back(f->getFileId());
     }
 
-    for (const std::string& fileId : toDelete)
-    {
+    for (const std::string& fileId : toDelete){
         deleteFile(fileId);
     }
 }
@@ -160,41 +353,58 @@ void FileSystem::reset()
     {
         b.deallocate();
     }
+    // Note: disk.img is NOT zeroed here — freed/reset blocks simply
+    // become unreferenced; their old bytes persist until overwritten
+    // by a future allocation, same as a real disk.
 }
 
 void FileSystem::compact()
 {
-    // Collect all allocated files in their current order and reassign them to contiguous blocks starting from 0
-    int nextBlock = 0;
+    // Structure to stage all file data safely in RAM before writing anything
+    struct FileDataBackup {
+        File* file;
+        std::vector<std::vector<char>> blockPayloads;
+    };
 
+    std::vector<FileDataBackup> stagedBackups;
+    stagedBackups.reserve(files.size());
+
+    // PHASE 1: Read all files into memory first
     for (auto& f : files)
     {
-        const std::vector<int>& oldBlocks = f->getAllocatedBlocks();
-        int size = static_cast<int>(oldBlocks.size());
+        FileDataBackup backup;
+        backup.file = f.get();
+        for (int blockId : f->getAllocatedBlocks())
+        {
+            backup.blockPayloads.push_back(disk->readBlock(blockId));
+        }
+        stagedBackups.push_back(std::move(backup));
+    }
 
-        // Build the new block list
+    // Deallocate all disk blocks completely
+    for (auto& b : blocks)
+    {
+        b.deallocate();
+    }
+
+    // PHASE 2: Reassign sequentially from block 0 and write back
+    int nextBlock = 0;
+    for (auto& staged : stagedBackups)
+    {
+        int count = static_cast<int>(staged.blockPayloads.size());
         std::vector<int> newBlocks;
-        for (int i = 0; i < size; i++)
+        newBlocks.reserve(count);
+
+        for (int i = 0; i < count; i++)
         {
-            newBlocks.push_back(nextBlock + i);
+            int targetBlock = nextBlock + i;
+            newBlocks.push_back(targetBlock);
+            blocks[targetBlock].allocate(staged.file->getFileId());
+            disk->writeBlock(targetBlock, staged.blockPayloads[i]);
         }
 
-        // Free old blocks
-        for (int blockId : oldBlocks)
-        {
-            blocks[blockId].deallocate();
-        }
-
-        // Allocate new contiguous blocks
-        for (int blockId : newBlocks)
-        {
-            blocks[blockId].allocate(f->getFileId());
-        }
-
-        // Update the file's allocation record
-        f->setAllocatedBlocks(newBlocks);
-
-        nextBlock += size;
+        staged.file->setAllocatedBlocks(newBlocks);
+        nextBlock += count;
     }
 }
 
@@ -231,6 +441,7 @@ std::string FileSystem::getSnapshotAsJson() const
         ss << "\"ownerPID\":\"" << f->getOwnerPID() << "\",";
         ss << "\"dirPath\":\"" << f->getDirPath() << "\",";
         ss << "\"sizeInBlocks\":" << f->getSizeInBlocks() << ",";
+        ss << "\"sizeInBytes\":" << f->getSizeInBytes() << ",";
         ss << "\"isOpen\":" << (f->isOpen() ? "true" : "false") << ",";
         ss << "\"createdAt\":" << f->getCreatedAt() << ",";
         ss << "\"lastAccessedAt\":" << f->getLastAccessedAt() << ",";

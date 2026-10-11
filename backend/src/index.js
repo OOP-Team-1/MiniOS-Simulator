@@ -41,6 +41,28 @@ startEngine(
             message: 'Engine crashed and is restarting. State has been reset.',
             timestamp: new Date().toISOString()
         });
+    },
+    (readResult) => {
+        // readResult: { type: "READ_RESULT", fileId, pid, ok, content }
+        // content arrives base64-encoded from the engine (if ok); decode for the client
+        const decoded = readResult.ok
+            ? Buffer.from(readResult.content, 'base64').toString('utf-8')
+            : null;
+
+        io.emit('file:read_result', {
+            fileId: readResult.fileId,
+            pid: readResult.pid,
+            ok: readResult.ok,
+            content: decoded
+        });
+    },
+    (engineError) => {
+        // engineError: { type: "ERROR", message }
+        // Raised when a command threw inside the engine (e.g. bad process params). The engine process itself stays alive.
+        io.emit('engine:command_error', {
+            message: engineError.message,
+            timestamp: new Date().toISOString()
+        });
     }
 );
 

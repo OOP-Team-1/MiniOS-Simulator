@@ -4,7 +4,7 @@ import { startAutoStep, stopAutoStep } from './simulationClock.js';
 export function registerSocketEvents(io) {
     io.on('connection', (socket) => {
         console.log(`[Socket.io] Client connected: ${socket.id}`);
-        
+
         sendCommand("STATE");
 
         // ── Simulation controls ───────────────────────────────────────────────
@@ -42,13 +42,13 @@ export function registerSocketEvents(io) {
         // ── Process creation ──────────────────────────────────────────────────
         socket.on('cmd:add_process', (data) => {
             const { name, priority, arrival, burst, memory } = data;
-            
+
             const safeName = String(name).replace(/[^a-zA-Z0-9_-]/g, '');
             const p = parseInt(priority, 10) || 1;
             const a = parseInt(arrival, 10) || 0;
             const b = parseInt(burst, 10) || 1;
             const m = parseInt(memory, 10) || 1;
-            
+
             if (safeName && b > 0 && m > 0) {
                 sendCommand(`ADD ${safeName} ${p} ${a} ${b} ${m}`);
             }
@@ -95,10 +95,41 @@ export function registerSocketEvents(io) {
             }
         });
 
+        // data: { fileId, byPID }
+        socket.on('cmd:file_read', (data) => {
+            const safeFileId = String(data.fileId).replace(/[^a-zA-Z0-9_-]/g, '');
+            const safePID    = String(data.byPID).replace(/[^a-zA-Z0-9_-]/g, '');
+            if (safeFileId && safePID) {
+                sendCommand(`FILE_READ ${safeFileId} ${safePID}`);
+            }
+        });
+
+        // data: { fileId, byPID, content }
+        // content is base64-encoded before crossing the line-based stdin
+        // protocol, so embedded newlines/quotes can't break command parsing
+        socket.on('cmd:file_write', (data) => {
+            const safeFileId = String(data.fileId).replace(/[^a-zA-Z0-9_-]/g, '');
+            const safePID    = String(data.byPID).replace(/[^a-zA-Z0-9_-]/g, '');
+            const b64Content = Buffer.from(String(data.content ?? ''), 'utf-8').toString('base64');
+            if (safeFileId && safePID) {
+                sendCommand(`FILE_WRITE ${safeFileId} ${safePID} ${b64Content}`);
+            }
+        });
+
+        // data: { fileId, byPID, content }
+        socket.on('cmd:file_append', (data) => {
+            const safeFileId = String(data.fileId).replace(/[^a-zA-Z0-9_-]/g, '');
+            const safePID    = String(data.byPID).replace(/[^a-zA-Z0-9_-]/g, '');
+            const b64Content = Buffer.from(String(data.content ?? ''), 'utf-8').toString('base64');
+            if (safeFileId && safePID) {
+                sendCommand(`FILE_APPEND ${safeFileId} ${safePID} ${b64Content}`);
+            }
+        });
+
         // ── Timer controls ────────────────────────────────────────────────────
-        socket.on('timer:start', ({ intervalMs }) => startAutoStep(intervalMs));
+        socket.on('timer:start', (data) => startAutoStep(data?.intervalMs));
         socket.on('timer:pause', () => stopAutoStep());
-        socket.on('timer:set_speed', ({ intervalMs }) => startAutoStep(intervalMs));
+        socket.on('timer:set_speed', (data) => startAutoStep(data?.intervalMs));
 
         socket.on('disconnect', () => {
             if (io.engine.clientsCount === 0) {
