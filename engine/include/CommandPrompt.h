@@ -65,5 +65,13 @@ public:
     std::string getHostname() const;
     const std::vector<std::string>& getCommandHistory() const;
 
+    // Used by Kernel for commands handled outside the basic file-system shell.
+    void recordExternalCommand(const std::string& command)
+    {
+        if (!command.empty()) {
+            commandHistory.push_back(command);
+        }
+    }
+
     void run();
 };
