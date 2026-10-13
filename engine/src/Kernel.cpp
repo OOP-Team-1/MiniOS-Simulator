@@ -1,6 +1,8 @@
 #include "../include/Kernel.h"
 
 #include <algorithm>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 
 Kernel::Kernel(
@@ -8,7 +10,9 @@ Kernel::Kernel(
     MemoryManager& memoryManager,
     FileSystem& fileSystem,
     PagingManager& pagingManager,
-    MemoryMode memoryMode
+    MemoryMode memoryMode,
+    const std::string& terminalUser,
+    const std::string& terminalHost
 )
     : scheduler(scheduler),
       memoryManager(memoryManager),
@@ -16,8 +20,195 @@ Kernel::Kernel(
       pagingManager(pagingManager),
       memoryMode(memoryMode),
       currentTime(0),
-      running(false)
+      running(false),
+      terminalUsername(terminalUser),
+      terminalHostname(terminalHost),
+      commandPrompt(nullptr)
 {
+}
+
+
+// ============================================================
+// COMMAND PROMPT / TERMINAL INTEGRATION
+// ============================================================
+
+CommandPrompt& Kernel::getCommandPrompt()
+{
+    if (!commandPrompt)
+    {
+        commandPrompt.reset(
+            new CommandPrompt(terminalUsername, terminalHostname, &fileSystem)
+        );
+    }
+
+    return *commandPrompt;
+}
+
+std::string Kernel::executeTerminalCommand(const std::string& command)
+{
+    std::istringstream commandStream(command);
+    std::vector<std::string> args;
+    std::string token;
+
+    while (commandStream >> token)
+    {
+        args.push_back(token);
+    }
+
+    if (args.empty())
+    {
+        return "";
+    }
+
+    const std::string& commandName = args[0];
+
+    // Keep the basic shell help, then document commands handled by Kernel.
+    if (commandName == "help")
+    {
+        std::string output = getCommandPrompt().executeCommand(command);
+        output += "\nKernel process commands:\n";
+        output += "  ps                         List processes\n";
+        output += "  top                        Show simulated time and processes\n";
+        output += "  spawn <name> <priority> <arrival> <burst> <memory>\n";
+        output += "                             Create a process\n";
+        output += "  kill <PID>                 Terminate a process\n";
+        output += "  time / uptime              Show simulated system time\n";
+        return output;
+    }
+
+    const bool isKernelCommand =
+        commandName == "ps" ||
+        commandName == "top" ||
+        commandName == "spawn" ||
+        commandName == "kill" ||
+        commandName == "time" ||
+        commandName == "uptime";
+
+    if (!isKernelCommand)
+    {
+        // File and shell commands are executed by CommandPrompt, which uses
+        // the very same FileSystem instance owned by this Kernel.
+        return getCommandPrompt().executeCommand(command);
+    }
+
+    getCommandPrompt().recordExternalCommand(command);
+
+    const auto processTable = [this]() -> std::string
+    {
+        std::vector<Process*> processes = processManager.getAllProcesses();
+        if (processes.empty())
+        {
+            return "No processes.\n";
+        }
+
+        std::ostringstream out;
+        out << std::left
+            << std::setw(16) << "PID"
+            << std::setw(16) << "STATE"
+            << std::setw(12) << "ARRIVAL"
+            << std::setw(14) << "REMAINING"
+            << "MEMORY\n";
+        out << std::string(70, '-') << '\n';
+
+        for (const Process* process : processes)
+        {
+            if (process == nullptr)
+            {
+                continue;
+            }
+
+            out << std::left
+                << std::setw(16) << process->getPID()
+                << std::setw(16) << process->getState()
+                << std::setw(12) << process->getArrivalTime()
+                << std::setw(14) << process->getRemainingTime()
+                << process->getMemoryRequired()
+                << '\n';
+        }
+
+        return out.str();
+    };
+
+    if (commandName == "ps")
+    {
+        return processTable();
+    }
+
+    if (commandName == "top")
+    {
+        std::ostringstream out;
+        out << "MiniOS simulated time: " << currentTime << "\n";
+        out << processTable();
+        return out.str();
+    }
+
+    if (commandName == "time" || commandName == "uptime")
+    {
+        return "Simulated time: " + std::to_string(currentTime) + " time unit(s)\n";
+    }
+
+    if (commandName == "spawn")
+    {
+        if (args.size() != 6)
+        {
+            return "Usage: spawn <name> <priority> <arrival> <burst> <memory>\n";
+        }
+
+        const auto parseInteger = [](const std::string& text, int& value) -> bool
+        {
+            std::istringstream valueStream(text);
+            char extraCharacter;
+
+            if (!(valueStream >> value))
+            {
+                return false;
+            }
+
+            return !(valueStream >> extraCharacter);
+        };
+
+        int priority = 0;
+        int arrivalTime = 0;
+        int burstTime = 0;
+        int memoryRequired = 0;
+
+        if (!parseInteger(args[2], priority) ||
+            !parseInteger(args[3], arrivalTime) ||
+            !parseInteger(args[4], burstTime) ||
+            !parseInteger(args[5], memoryRequired))
+        {
+            return "spawn: priority, arrival, burst, and memory must be integers\n";
+        }
+
+        try
+        {
+            Process& process = createProcess(
+                args[1], priority, arrivalTime, burstTime, memoryRequired
+            );
+            return "Created process with PID " + process.getPID() + "\n";
+        }
+        catch (const std::exception& error)
+        {
+            return std::string("spawn: ") + error.what() + "\n";
+        }
+    }
+
+    if (commandName == "kill")
+    {
+        if (args.size() != 2)
+        {
+            return "Usage: kill <PID>\n";
+        }
+
+        if (!terminateProcess(args[1]))
+        {
+            return "kill: process not found: " + args[1] + "\n";
+        }
+
+        return "Terminated process " + args[1] + "\n";
+    }
+
+    return "";
 }
 
 

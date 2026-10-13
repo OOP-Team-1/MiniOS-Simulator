@@ -38,4 +38,6 @@ add_executable(main
     ../src/FileSystem.cpp
 
     ../src/DiskStorage.cpp
+
+    ../src/CommandPrompt.cpp
 )

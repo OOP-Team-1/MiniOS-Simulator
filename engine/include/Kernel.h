@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -9,6 +10,7 @@
 #include "MemoryManager.h"
 #include "FileSystem.h"
 #include "PagingManager.h"
+#include "CommandPrompt.h"
 
 enum class MemoryMode
 {
@@ -33,6 +35,12 @@ private:
     int currentTime;
     bool running;
 
+    // The terminal is created only when first used, so constructing the
+    // Kernel alone does not populate the file system with demo terminal files.
+    std::string terminalUsername;
+    std::string terminalHostname;
+    std::unique_ptr<CommandPrompt> commandPrompt;
+
 private:
     void updateArrivals();
 
@@ -54,7 +62,9 @@ public:
         MemoryManager& memoryManager,
         FileSystem& fileSystem,
         PagingManager& pagingManager,
-        MemoryMode memoryMode = MemoryMode::CONTIGUOUS
+        MemoryMode memoryMode = MemoryMode::CONTIGUOUS,
+        const std::string& terminalUser = "nitw",
+        const std::string& terminalHost = "minios"
     );
 
     // Process management
@@ -77,6 +87,14 @@ public:
     bool setMemoryMode(MemoryMode mode);
 
     MemoryMode getMemoryMode() const;
+
+    // Kernel-integrated terminal. Route terminal input through this method
+    // so process commands (ps, spawn, kill, top, time) reach the Kernel.
+    std::string executeTerminalCommand(const std::string& command);
+
+    // Provides access to terminal metadata (prompt, path, username, history).
+    // The terminal instance is initialized on first access.
+    CommandPrompt& getCommandPrompt();
 
     // Kernel state
     int getCurrentTime() const;
