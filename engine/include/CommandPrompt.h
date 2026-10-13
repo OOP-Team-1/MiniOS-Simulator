@@ -41,6 +41,10 @@ private:
     std::string executeLs(const std::vector<std::string>& args);
     std::string executeCd(const std::vector<std::string>& args);
     std::string executeEcho(const std::string& fullCmd);
+    std::string executePrintf(const std::string& fullCmd);
+    std::string executeRead(const std::vector<std::string>& args);
+    std::string executeWrite(const std::string& fullCmd);
+    std::string executeAppend(const std::string& fullCmd);
     std::string executeMkdir(const std::vector<std::string>& args);
     std::string executeRm(const std::vector<std::string>& args);
     std::string executePwd();
@@ -51,6 +55,12 @@ private:
     std::string executeDate();
     std::string executeUname(const std::vector<std::string>& args);
     std::string executeHelp();
+
+    // Helpers for parsing and escape sequences
+    static std::string stripQuotes(const std::string& str);
+    static std::string processEscapes(const std::string& str);
+    bool parseRedirection(const std::string& input, std::string& baseCmd, std::string& targetFile, bool& isAppend);
+    bool writeToFileOrPath(const std::string& target, const std::string& content, bool isAppend);
 
 public:
     CommandPrompt(const std::string& user, const std::string& host, FileSystem* fileSystem);

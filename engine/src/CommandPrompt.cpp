@@ -17,6 +17,8 @@ CommandPrompt::CommandPrompt(const std::string& user, const std::string& host, F
     for (const auto& dir : defaultDirs) {
         fs->createFile("SYSTEM", ".dir_marker", 1, 0, "~/" + dir);
     }
+    // Ensure ~/linux-lab/notes directory exists for CLI usage
+    fs->createFile("SYSTEM", ".dir_marker", 1, 0, "~/linux-lab/notes");
 
     std::string f1 = fs->createFile("SYSTEM", "Computer Organization and Architecture.pdf", 1, 0, "~/Downloads");
     std::string f2 = fs->createFile("SYSTEM", "code_1.140.0-1790759618_amd64.deb", 1, 0, "~/Downloads");
@@ -103,31 +105,188 @@ std::vector<std::string> CommandPrompt::getSubdirectories(const std::string& pat
     return dirs;
 }
 
+std::string CommandPrompt::stripQuotes(const std::string& str) {
+    if (str.length() >= 2) {
+        if ((str.front() == '"' && str.back() == '"') || (str.front() == '\'' && str.back() == '\'')) {
+            return str.substr(1, str.length() - 2);
+        }
+    }
+    return str;
+}
+
+std::string CommandPrompt::processEscapes(const std::string& str) {
+    std::string result;
+    result.reserve(str.size());
+    for (size_t i = 0; i < str.size(); ++i) {
+        if (str[i] == '\\' && i + 1 < str.size()) {
+            switch (str[i + 1]) {
+                case 'n': result += '\n'; ++i; break;
+                case 't': result += '\t'; ++i; break;
+                case 'r': result += '\r'; ++i; break;
+                case '\\': result += '\\'; ++i; break;
+                case '"': result += '"'; ++i; break;
+                case '\'': result += '\''; ++i; break;
+                default:
+                    result += str[i];
+                    break;
+            }
+        } else {
+            result += str[i];
+        }
+    }
+    return result;
+}
+
+bool CommandPrompt::parseRedirection(const std::string& input, std::string& baseCmd, std::string& targetFile, bool& isAppend) {
+    bool inDoubleQuotes = false;
+    bool inSingleQuotes = false;
+    bool escaped = false;
+    size_t redirectPos = std::string::npos;
+    isAppend = false;
+
+    for (size_t i = 0; i < input.size(); ++i) {
+        char c = input[i];
+        if (escaped) {
+            escaped = false;
+        } else if (c == '\\') {
+            escaped = true;
+        } else if (c == '"' && !inSingleQuotes) {
+            inDoubleQuotes = !inDoubleQuotes;
+        } else if (c == '\'' && !inDoubleQuotes) {
+            inSingleQuotes = !inSingleQuotes;
+        } else if (!inDoubleQuotes && !inSingleQuotes) {
+            if (c == '>') {
+                redirectPos = i;
+                if (i + 1 < input.size() && input[i + 1] == '>') {
+                    isAppend = true;
+                }
+                break;
+            }
+        }
+    }
+
+    if (redirectPos == std::string::npos) {
+        return false;
+    }
+
+    baseCmd = input.substr(0, redirectPos);
+    size_t fileStart = redirectPos + (isAppend ? 2 : 1);
+    std::string rawFile = input.substr(fileStart);
+    
+    size_t s = rawFile.find_first_not_of(" \t\r\n");
+    size_t e = rawFile.find_last_not_of(" \t\r\n");
+    if (s != std::string::npos && e != std::string::npos) {
+        targetFile = rawFile.substr(s, e - s + 1);
+    } else {
+        targetFile = "";
+    }
+    targetFile = stripQuotes(targetFile);
+
+    size_t be = baseCmd.find_last_not_of(" \t\r\n");
+    if (be != std::string::npos) {
+        baseCmd = baseCmd.substr(0, be + 1);
+    }
+
+    return true;
+}
+
+bool CommandPrompt::writeToFileOrPath(const std::string& target, const std::string& content, bool isAppend) {
+    std::string filename = stripQuotes(target);
+    std::string targetDir = currentPathString;
+    
+    size_t lastSlash = filename.find_last_of('/');
+    if (lastSlash != std::string::npos) {
+        std::string dirPart = filename.substr(0, lastSlash);
+        filename = filename.substr(lastSlash + 1);
+        if (dirPart == "~") targetDir = "~";
+        else if (dirPart.find("~") == 0) targetDir = dirPart;
+        else if (targetDir == "~") targetDir = "~/" + dirPart;
+        else targetDir = targetDir + "/" + dirPart;
+    }
+
+    std::string fileId = "";
+    std::string ownerPID = "USER";
+    auto entries = getFileEntriesInPath(targetDir);
+    for (const auto& e : entries) {
+        if (e.name == filename) {
+            fileId = e.fileId;
+            ownerPID = e.ownerPID;
+            break;
+        }
+    }
+
+    if (fileId.empty()) {
+        fileId = fs->createFile("USER", filename, 1, 0, targetDir);
+        ownerPID = "USER";
+    }
+
+    if (fileId.empty()) return false;
+
+    if (isAppend) {
+        return appendFileContent(fileId, ownerPID, content);
+    } else {
+        return writeFileContent(fileId, ownerPID, content);
+    }
+}
+
 bool CommandPrompt::readFileContent(const std::string& fileId, const std::string& ownerPID, std::string& outContent) {
+    fs->closeFile(fileId, ownerPID);
+    fs->closeFile(fileId, "USER");
+    fs->closeFile(fileId, "SYSTEM");
+
     bool opened = fs->openFile(fileId, ownerPID, 0);
+    if (!opened) {
+        opened = fs->openFile(fileId, "USER", 0) || fs->openFile(fileId, "SYSTEM", 0);
+    }
     bool ok = false;
     outContent = fs->readFile(fileId, ownerPID, 0, ok);
-    if (opened) {
-        fs->closeFile(fileId, ownerPID);
+    if (!ok) {
+        outContent = fs->readFile(fileId, "USER", 0, ok);
     }
+    if (!ok) {
+        outContent = fs->readFile(fileId, "SYSTEM", 0, ok);
+    }
+    fs->closeFile(fileId, ownerPID);
+    fs->closeFile(fileId, "USER");
+    fs->closeFile(fileId, "SYSTEM");
     return ok;
 }
 
 bool CommandPrompt::writeFileContent(const std::string& fileId, const std::string& ownerPID, const std::string& content) {
+    fs->closeFile(fileId, ownerPID);
+    fs->closeFile(fileId, "USER");
+    fs->closeFile(fileId, "SYSTEM");
+
     bool opened = fs->openFile(fileId, ownerPID, 0);
-    bool ok = fs->writeFile(fileId, ownerPID, content, 0);
-    if (opened) {
-        fs->closeFile(fileId, ownerPID);
+    if (!opened) {
+        opened = fs->openFile(fileId, "USER", 0) || fs->openFile(fileId, "SYSTEM", 0);
     }
+    bool ok = fs->writeFile(fileId, ownerPID, content, 0);
+    if (!ok) {
+        ok = fs->writeFile(fileId, "USER", content, 0) || fs->writeFile(fileId, "SYSTEM", content, 0);
+    }
+    fs->closeFile(fileId, ownerPID);
+    fs->closeFile(fileId, "USER");
+    fs->closeFile(fileId, "SYSTEM");
     return ok;
 }
 
 bool CommandPrompt::appendFileContent(const std::string& fileId, const std::string& ownerPID, const std::string& content) {
+    fs->closeFile(fileId, ownerPID);
+    fs->closeFile(fileId, "USER");
+    fs->closeFile(fileId, "SYSTEM");
+
     bool opened = fs->openFile(fileId, ownerPID, 0);
-    bool ok = fs->appendFile(fileId, ownerPID, content, 0);
-    if (opened) {
-        fs->closeFile(fileId, ownerPID);
+    if (!opened) {
+        opened = fs->openFile(fileId, "USER", 0) || fs->openFile(fileId, "SYSTEM", 0);
     }
+    bool ok = fs->appendFile(fileId, ownerPID, content, 0);
+    if (!ok) {
+        ok = fs->appendFile(fileId, "USER", content, 0) || fs->appendFile(fileId, "SYSTEM", content, 0);
+    }
+    fs->closeFile(fileId, ownerPID);
+    fs->closeFile(fileId, "USER");
+    fs->closeFile(fileId, "SYSTEM");
     return ok;
 }
 
@@ -161,9 +320,31 @@ const std::vector<std::string>& CommandPrompt::getCommandHistory() const {
 
 std::vector<std::string> CommandPrompt::splitCommand(const std::string& cmd) {
     std::vector<std::string> tokens;
-    std::stringstream ss(cmd);
-    std::string token;
-    while (ss >> token) tokens.push_back(token);
+    std::string current;
+    bool inDoubleQuotes = false;
+    bool inSingleQuotes = false;
+
+    for (size_t i = 0; i < cmd.size(); ++i) {
+        char c = cmd[i];
+        if (c == '\\' && i + 1 < cmd.size() && (cmd[i + 1] == '"' || cmd[i + 1] == '\'' || cmd[i + 1] == '\\')) {
+            current += cmd[i + 1];
+            ++i;
+        } else if (c == '"' && !inSingleQuotes) {
+            inDoubleQuotes = !inDoubleQuotes;
+        } else if (c == '\'' && !inDoubleQuotes) {
+            inSingleQuotes = !inSingleQuotes;
+        } else if (std::isspace(static_cast<unsigned char>(c)) && !inDoubleQuotes && !inSingleQuotes) {
+            if (!current.empty()) {
+                tokens.push_back(current);
+                current.clear();
+            }
+        } else {
+            current += c;
+        }
+    }
+    if (!current.empty()) {
+        tokens.push_back(current);
+    }
     return tokens;
 }
 
@@ -319,82 +500,139 @@ std::string CommandPrompt::executeCd(const std::vector<std::string>& args) {
 }
 
 std::string CommandPrompt::executeEcho(const std::string& fullCmd) {
-    size_t appendPos = fullCmd.find(">>");
-    size_t redirectPos = (appendPos != std::string::npos) ? appendPos : fullCmd.find(">");
-
-    if (redirectPos != std::string::npos) {
-        bool isAppend = (appendPos != std::string::npos);
-        size_t filenameStart = redirectPos + (isAppend ? 2 : 1);
-        std::string filename = fullCmd.substr(filenameStart);
-        size_t start = filename.find_first_not_of(" ");
-        if (start != std::string::npos) filename = filename.substr(start);
-        else filename = "";
-        size_t end = filename.find_last_not_of(" ");
-        if (end != std::string::npos) filename = filename.substr(0, end + 1);
-
-        std::string content = "";
-        size_t echoPos = fullCmd.find("echo");
-        if (echoPos != std::string::npos && redirectPos > echoPos + 4) {
-            content = fullCmd.substr(echoPos + 4, redirectPos - (echoPos + 4));
-            size_t cStart = content.find_first_not_of(" ");
-            if (cStart != std::string::npos) content = content.substr(cStart);
-            else content = "";
-            size_t cEnd = content.find_last_not_of(" ");
-            if (cEnd != std::string::npos) content = content.substr(0, cEnd + 1);
-            else content = "";
-            if (content.length() >= 2 && content.front() == '"' && content.back() == '"') {
-                content = content.substr(1, content.length() - 2);
-            }
-        }
-
-        std::string fileId = "";
-        std::string ownerPID = "USER";
-        auto entries = getFileEntriesInPath(currentPathString);
-        for (const auto& e : entries) {
-            if (e.name == filename) {
-                fileId = e.fileId;
-                ownerPID = e.ownerPID;
-                break;
-            }
-        }
-
-        if (fileId.empty()) {
-            fileId = fs->createFile("USER", filename, 1, 0, currentPathString);
-            ownerPID = "USER";
-        }
-
-        if (!fileId.empty()) {
-            std::string toWrite = content + "\n";
-            if (isAppend) {
-                appendFileContent(fileId, ownerPID, toWrite);
-            } else {
-                writeFileContent(fileId, ownerPID, toWrite);
-            }
-        }
-
+    std::string baseCmd, targetFile;
+    bool isAppend = false;
+    if (parseRedirection(fullCmd, baseCmd, targetFile, isAppend)) {
+        std::string output = executeEcho(baseCmd);
+        writeToFileOrPath(targetFile, output, isAppend);
         return "";
-    } else {
-        size_t echoPos = fullCmd.find("echo");
-        if (echoPos != std::string::npos && fullCmd.length() > echoPos + 4) {
-            std::string text = fullCmd.substr(echoPos + 4);
-            size_t cStart = text.find_first_not_of(" ");
-            if (cStart != std::string::npos) text = text.substr(cStart);
-            else text = "";
-            if (text.length() >= 2 && text.front() == '"' && text.back() == '"') {
-                text = text.substr(1, text.length() - 2);
+    }
+
+    std::vector<std::string> args = splitCommand(fullCmd);
+    if (args.size() <= 1) return "\n";
+
+    bool interpretEscapes = false;
+    bool noTrailingNewline = false;
+    size_t startIdx = 1;
+
+    while (startIdx < args.size() && args[startIdx].rfind("-", 0) == 0 && args[startIdx].size() > 1) {
+        if (args[startIdx] == "-e") interpretEscapes = true;
+        else if (args[startIdx] == "-n") noTrailingNewline = true;
+        else if (args[startIdx] == "-en" || args[startIdx] == "-ne") {
+            interpretEscapes = true;
+            noTrailingNewline = true;
+        } else break;
+        startIdx++;
+    }
+
+    std::ostringstream out;
+    for (size_t i = startIdx; i < args.size(); ++i) {
+        std::string text = stripQuotes(args[i]);
+        if (interpretEscapes) {
+            text = processEscapes(text);
+        }
+        out << text << (i + 1 < args.size() ? " " : "");
+    }
+    if (!noTrailingNewline) {
+        out << "\n";
+    }
+    return out.str();
+}
+
+std::string CommandPrompt::executePrintf(const std::string& fullCmd) {
+    std::string baseCmd, targetFile;
+    bool isAppend = false;
+    if (parseRedirection(fullCmd, baseCmd, targetFile, isAppend)) {
+        std::string output = executePrintf(baseCmd);
+        writeToFileOrPath(targetFile, output, isAppend);
+        return "";
+    }
+
+    std::vector<std::string> args = splitCommand(fullCmd);
+    if (args.size() <= 1) return "";
+
+    std::string format = stripQuotes(args[1]);
+    std::string processed = processEscapes(format);
+
+    if (args.size() > 2) {
+        size_t argIdx = 2;
+        std::string result;
+        for (size_t i = 0; i < processed.size(); ++i) {
+            if (processed[i] == '%' && i + 1 < processed.size() && (processed[i + 1] == 's' || processed[i + 1] == 'd')) {
+                if (argIdx < args.size()) {
+                    result += stripQuotes(args[argIdx++]);
+                }
+                i++;
+            } else {
+                result += processed[i];
             }
-            return text + "\n";
-        } else {
-            return "\n";
+        }
+        return result;
+    }
+
+    return processed;
+}
+
+std::string CommandPrompt::executeRead(const std::vector<std::string>& args) {
+    if (args.size() < 2) return "read: missing file operand\n";
+    return executeCat(args);
+}
+
+std::string CommandPrompt::executeWrite(const std::string& fullCmd) {
+    std::vector<std::string> args = splitCommand(fullCmd);
+    if (args.size() < 2) {
+        return "write: missing file operand\nUsage: write <filename> <content>\n";
+    }
+    std::string target = args[1];
+    std::string content = "";
+    if (args.size() >= 3) {
+        size_t pos = fullCmd.find(target);
+        if (pos != std::string::npos) {
+            pos += target.length();
+            content = fullCmd.substr(pos);
+            size_t s = content.find_first_not_of(" \t");
+            if (s != std::string::npos) content = content.substr(s);
+            content = stripQuotes(content);
+            content = processEscapes(content);
         }
     }
+    bool ok = writeToFileOrPath(target, content, false);
+    if (!ok) {
+        return "write: failed to write to " + target + "\n";
+    }
+    return "";
+}
+
+std::string CommandPrompt::executeAppend(const std::string& fullCmd) {
+    std::vector<std::string> args = splitCommand(fullCmd);
+    if (args.size() < 2) {
+        return "append: missing file operand\nUsage: append <filename> <content>\n";
+    }
+    std::string target = args[1];
+    std::string content = "";
+    if (args.size() >= 3) {
+        size_t pos = fullCmd.find(target);
+        if (pos != std::string::npos) {
+            pos += target.length();
+            content = fullCmd.substr(pos);
+            size_t s = content.find_first_not_of(" \t");
+            if (s != std::string::npos) content = content.substr(s);
+            content = stripQuotes(content);
+            content = processEscapes(content);
+        }
+    }
+    bool ok = writeToFileOrPath(target, content, true);
+    if (!ok) {
+        return "append: failed to append to " + target + "\n";
+    }
+    return "";
 }
 
 std::string CommandPrompt::executeMkdir(const std::vector<std::string>& args) {
     if (args.size() < 2) { 
         return "mkdir: missing operand\n"; 
     }
-    std::string dirName = args[1];
+    std::string dirName = stripQuotes(args[1]);
     std::string newDirPath = (currentPathString == "~") ? currentPathString + "/" + dirName : currentPathString + "/" + dirName;
     fs->createFile("USER", ".dir_marker", 1, 0, newDirPath);
     return "";
@@ -404,13 +642,13 @@ std::string CommandPrompt::executeRm(const std::vector<std::string>& args) {
     if (args.size() < 2) { 
         return "rm: missing operand\n"; 
     }
-    std::string target = args[1];
+    std::string target = stripQuotes(args[1]);
     bool isRecursive = (target == "-r" || target == "-rf");
     if (isRecursive) {
         if (args.size() < 3) { 
             return "rm: missing operand\n"; 
         }
-        target = args[2];
+        target = stripQuotes(args[2]);
     }
 
     auto entries = getFileEntriesInPath(currentPathString);
@@ -452,7 +690,7 @@ std::string CommandPrompt::executeTouch(const std::vector<std::string>& args) {
     }
     auto entries = getFileEntriesInPath(currentPathString);
     for (size_t i = 1; i < args.size(); ++i) {
-        std::string filename = args[i];
+        std::string filename = stripQuotes(args[i]);
         bool exists = false;
         for (const auto& e : entries) {
             if (e.name == filename) {
@@ -475,30 +713,49 @@ std::string CommandPrompt::executeTouch(const std::vector<std::string>& args) {
 
 std::string CommandPrompt::executeCat(const std::vector<std::string>& args) {
     if (args.size() < 2) return "";
-    std::string target = args[1];
+    std::ostringstream out;
     
-    auto entries = getFileEntriesInPath(currentPathString);
-    for (const auto& e : entries) {
-        if (e.name == target) {
-            std::string content;
-            bool ok = readFileContent(e.fileId, e.ownerPID, content);
-            if (ok) {
-                if (!content.empty() && content.back() != '\n') {
-                    content += "\n";
+    for (size_t i = 1; i < args.size(); ++i) {
+        std::string target = stripQuotes(args[i]);
+        std::string targetDir = currentPathString;
+        std::string filename = target;
+        
+        size_t lastSlash = target.find_last_of('/');
+        if (lastSlash != std::string::npos) {
+            std::string dirPart = target.substr(0, lastSlash);
+            filename = target.substr(lastSlash + 1);
+            if (dirPart == "~") targetDir = "~";
+            else if (dirPart.find("~") == 0) targetDir = dirPart;
+            else if (targetDir == "~") targetDir = "~/" + dirPart;
+            else targetDir = targetDir + "/" + dirPart;
+        }
+
+        auto entries = getFileEntriesInPath(targetDir);
+        bool found = false;
+        for (const auto& e : entries) {
+            if (e.name == filename) {
+                found = true;
+                std::string content;
+                bool ok = readFileContent(e.fileId, e.ownerPID, content);
+                if (ok) {
+                    out << content;
+                } else {
+                    out << "[File System Emulator] Binary file or content not readable by OS.\n";
                 }
-                return content;
+                break;
+            }
+        }
+        
+        if (!found) {
+            auto dirs = getSubdirectories(targetDir);
+            if (std::find(dirs.begin(), dirs.end(), filename) != dirs.end()) {
+                out << "cat: " << target << ": Is a directory\n";
             } else {
-                return "[File System Emulator] Binary file or content not readable by OS.\n";
+                out << "cat: '" << target << "': No such file or directory\n";
             }
         }
     }
-    
-    auto dirs = getSubdirectories(currentPathString);
-    if (std::find(dirs.begin(), dirs.end(), target) != dirs.end()) {
-        return "cat: " + target + ": Is a directory\n";
-    }
-    
-    return "cat: " + target + ": No such file or directory\n";
+    return out.str();
 }
 
 std::string CommandPrompt::executeHistory() {
@@ -535,7 +792,11 @@ std::string CommandPrompt::executeHelp() {
         << "  rm       - Remove files or directories (use -r for recursive)\n"
         << "  touch    - Create an empty file\n"
         << "  cat      - Read a file\n"
-        << "  echo     - Write text (supports > and >> redirection)\n"
+        << "  echo     - Write/print text (supports -e, -n, and > / >> redirection)\n"
+        << "  printf   - Formatted print with escapes (supports > / >> redirection)\n"
+        << "  read     - Read file content (alias to cat)\n"
+        << "  write    - Directly overwrite file content: write <file> <content>\n"
+        << "  append   - Directly append file content: append <file> <content>\n"
         << "  history  - View command history\n"
         << "  date     - Show system date and time\n"
         << "  uname    - Print system information\n"
@@ -551,6 +812,21 @@ std::string CommandPrompt::executeCommand(const std::string& input) {
     if (input.find(";") != std::string::npos) { 
         return "bash: syntax error near unexpected token `;'\n"; 
     }
+
+    // Check for general redirection > or >> outside quotes
+    std::string baseCmd, targetFile;
+    bool isAppend = false;
+    if (parseRedirection(input, baseCmd, targetFile, isAppend)) {
+        if (targetFile.empty()) {
+            return "bash: syntax error near unexpected token `newline'\n";
+        }
+        std::string output = executeCommand(baseCmd);
+        bool ok = writeToFileOrPath(targetFile, output, isAppend);
+        if (!ok) {
+            return "bash: " + targetFile + ": Permission denied or disk full\n";
+        }
+        return "";
+    }
     
     std::vector<std::string> args = splitCommand(input);
     if (args.empty()) return "";
@@ -561,6 +837,10 @@ std::string CommandPrompt::executeCommand(const std::string& input) {
     else if (cmd == "ls") return executeLs(args);
     else if (cmd == "cd") return executeCd(args);
     else if (cmd == "echo") return executeEcho(input);
+    else if (cmd == "printf") return executePrintf(input);
+    else if (cmd == "read") return executeRead(args);
+    else if (cmd == "write") return executeWrite(input);
+    else if (cmd == "append") return executeAppend(input);
     else if (cmd == "mkdir") return executeMkdir(args);
     else if (cmd == "rm") return executeRm(args);
     else if (cmd == "pwd") return executePwd();
