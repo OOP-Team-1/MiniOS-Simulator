@@ -1,6 +1,6 @@
 import readline from 'readline';
 
-export function createStreamParser(stdout, onTelemetry, onError, onReadResult) {
+export function createStreamParser(stdout, onTelemetry, onError, onReadResult, onEngineError) {
     const rl = readline.createInterface({
         input: stdout,
         terminal: false

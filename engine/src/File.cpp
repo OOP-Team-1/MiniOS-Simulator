@@ -3,7 +3,7 @@
 File::File(const std::string& fileId,
            const std::string& name,
            const std::string& ownerPID,
-           const std::string& dirPath,
+           const std::string& dirId,
            int sizeInBlocks,
            const std::vector<int>& allocatedBlocks,
            int createdAt)
@@ -11,7 +11,7 @@ File::File(const std::string& fileId,
     this->fileId = fileId;
     this->name = name;
     this->ownerPID = ownerPID;
-    this->dirPath = dirPath;
+    this->dirId = dirId;
     this->sizeInBlocks = sizeInBlocks;
     this->sizeInBytes = 0; // new file starts with no content written yet
     this->allocatedBlocks = allocatedBlocks;
@@ -23,7 +23,7 @@ File::File(const std::string& fileId,
 std::string File::getFileId() const { return this->fileId; }
 std::string File::getName() const { return this->name; }
 std::string File::getOwnerPID() const { return this->ownerPID; }
-std::string File::getDirPath() const { return this->dirPath; }
+std::string File::getDirId() const { return this->dirId; }
 int File::getSizeInBlocks() const { return this->sizeInBlocks; }
 int File::getSizeInBytes() const { return this->sizeInBytes; }
 bool File::isOpen() const { return this->open; }
@@ -45,4 +45,8 @@ void File::setName(const std::string& newName)
 void File::setSizeInBytes(int bytes)
 {
     this->sizeInBytes = bytes;
+}
+void File::setDirId(const std::string& newDirId)
+{
+    this->dirId = newDirId;
 }

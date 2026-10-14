@@ -46,15 +46,22 @@ public:
         int memoryRequired
     );
 
+    // Directory operations — called by main.cpp command handler
+    std::string createDirectory(const std::string& name, const std::string& parentDirId);
+    bool deleteDirectory(const std::string& dirId);
+    bool renameDirectory(const std::string& dirId, const std::string& newName);
+    bool moveDirectory(const std::string& dirId, const std::string& newParentDirId);
+
     // File operations — called by main.cpp command handler
     std::string createFile(const std::string& ownerPID,
                            const std::string& name,
                            int sizeInBlocks,
-                           const std::string& dirPath = "/");
+                           const std::string& dirId = "");
 
     bool deleteFile(const std::string& fileId);
     bool openFile(const std::string& fileId, const std::string& byPID);
     bool closeFile(const std::string& fileId, const std::string& byPID);
+    bool moveFile(const std::string& fileId, const std::string& newDirId);
 
     // Content I/O
     // ok is set to false if the read failed (not found / not open / wrong owner)
@@ -72,6 +79,8 @@ public:
     void run();
 
     void reset();
+
+    bool killProcess(const std::string& pid);
 
     void compactDisk();
 

@@ -4,19 +4,30 @@
 #include <algorithm>
 #include <cmath>
 
+const std::string FileSystem::ROOT_DIR_ID = "D0";
+
 FileSystem::FileSystem(int totalBlocks, int blockSize, FileAllocationStrategy& strategy, const std::string& diskImagePath)
 {
     this->totalBlocks = totalBlocks;
     this->blockSize = blockSize;
     this->strategy = &strategy;
     this->nextFileId = 1;
+    this->nextDirId = 1; // D0 is reserved for root, real counter starts at 1
 
     for (int i = 0; i < totalBlocks; i++)
     {
         blocks.emplace_back(i);
     }
 
+    // Root directory always exists, has no parent (parentDirId == "").
+    directories.push_back(std::make_unique<Directory>(ROOT_DIR_ID, "/", "", 0));
+
     this->disk = std::make_unique<DiskStorage>(diskImagePath, totalBlocks, blockSize);
+}
+
+std::string FileSystem::getRootDirId()
+{
+    return ROOT_DIR_ID;
 }
 
 File* FileSystem::findFile(const std::string& fileId)
@@ -25,6 +36,26 @@ File* FileSystem::findFile(const std::string& fileId)
     {
         if (f->getFileId() == fileId)
             return f.get();
+    }
+    return nullptr;
+}
+
+Directory* FileSystem::findDirectory(const std::string& dirId)
+{
+    for (auto& d : directories)
+    {
+        if (d->getDirId() == dirId)
+            return d.get();
+    }
+    return nullptr;
+}
+
+const Directory* FileSystem::findDirectory(const std::string& dirId) const
+{
+    for (const auto& d : directories)
+    {
+        if (d->getDirId() == dirId)
+            return d.get();
     }
     return nullptr;
 }
@@ -47,13 +78,227 @@ void FileSystem::freeBlocks(const std::vector<int>& blockIds)
     }
 }
 
+bool FileSystem::isSameOrDescendant(const std::string& candidateId, const std::string& ancestorId) const
+{
+    // Walks candidateId's ancestor chain up to the root, looking for ancestorId.
+    std::string current = candidateId;
+    int guard = 0; // safety against an accidental cycle already in the tree
+
+    while (!current.empty() && guard < static_cast<int>(directories.size()) + 1)
+    {
+        if (current == ancestorId) return true;
+
+        const Directory* d = findDirectory(current);
+        if (!d) break;
+
+        current = d->getParentDirId();
+        guard++;
+    }
+
+    return false;
+}
+
+// ============================================================
+// DIRECTORY OPERATIONS
+// ============================================================
+
+std::string FileSystem::createDirectory(const std::string& name,
+                                         const std::string& parentDirId,
+                                         int currentTick)
+{
+    if (name.empty()) return "";
+
+    Directory* parent = findDirectory(parentDirId);
+    if (!parent) return ""; // parent must exist
+
+    // Reject duplicate sibling names (both subdirectories and files share one namespace per folder, like a real filesystem).
+    for (const auto& d : directories)
+    {
+        if (d->getParentDirId() == parentDirId && d->getName() == name)
+            return "";
+    }
+    for (const auto& f : files)
+    {
+        if (f->getDirId() == parentDirId && f->getName() == name)
+            return "";
+    }
+
+    std::string dirId = "D" + std::to_string(nextDirId++);
+    directories.push_back(std::make_unique<Directory>(dirId, name, parentDirId, currentTick));
+    return dirId;
+}
+
+bool FileSystem::deleteDirectory(const std::string& dirId)
+{
+    if (dirId == ROOT_DIR_ID) return false; // root is permanent
+
+    Directory* dir = findDirectory(dirId);
+    if (!dir) return false;
+
+    // Must be empty: no files directly inside, no subdirectories.
+    for (const auto& f : files)
+    {
+        if (f->getDirId() == dirId) return false;
+    }
+    for (const auto& d : directories)
+    {
+        if (d->getParentDirId() == dirId) return false;
+    }
+
+    directories.erase(
+        std::remove_if(directories.begin(), directories.end(),
+            [&](const std::unique_ptr<Directory>& d) { return d->getDirId() == dirId; }),
+        directories.end()
+    );
+
+    return true;
+}
+
+bool FileSystem::renameDirectory(const std::string& dirId, const std::string& newName)
+{
+    if (newName.empty()) return false;
+    if (dirId == ROOT_DIR_ID) return false; // root name is fixed
+
+    Directory* dir = findDirectory(dirId);
+    if (!dir) return false;
+
+    // Reject a rename that collides with an existing sibling.
+    for (const auto& d : directories)
+    {
+        if (d->getDirId() != dirId &&
+            d->getParentDirId() == dir->getParentDirId() &&
+            d->getName() == newName)
+            return false;
+    }
+    for (const auto& f : files)
+    {
+        if (f->getDirId() == dir->getParentDirId() && f->getName() == newName)
+            return false;
+    }
+
+    dir->setName(newName);
+    return true;
+}
+
+bool FileSystem::moveDirectory(const std::string& dirId, const std::string& newParentDirId)
+{
+    if (dirId == ROOT_DIR_ID) return false; // root can't be moved
+
+    Directory* dir = findDirectory(dirId);
+    if (!dir) return false;
+
+    Directory* newParent = findDirectory(newParentDirId);
+    if (!newParent) return false;
+
+    if (dirId == newParentDirId) return false;
+
+    // Prevent cycles: newParentDirId can't be dirId itself or any descendant of it.
+    if (isSameOrDescendant(newParentDirId, dirId)) return false;
+
+    // Reject a move that collides with an existing sibling under the new parent.
+    for (const auto& d : directories)
+    {
+        if (d->getDirId() != dirId &&
+            d->getParentDirId() == newParentDirId &&
+            d->getName() == dir->getName())
+            return false;
+    }
+    for (const auto& f : files)
+    {
+        if (f->getDirId() == newParentDirId && f->getName() == dir->getName())
+            return false;
+    }
+
+    dir->setParentDirId(newParentDirId);
+    return true;
+}
+
+bool FileSystem::directoryExists(const std::string& dirId) const
+{
+    return findDirectory(dirId) != nullptr;
+}
+
+DirectoryInfo FileSystem::getDirectoryInfo(const std::string& dirId) const
+{
+    const Directory* d = findDirectory(dirId);
+    if (!d) return DirectoryInfo{ "", "", "" };
+    return DirectoryInfo{ d->getDirId(), d->getName(), d->getParentDirId() };
+}
+
+std::vector<DirectoryInfo> FileSystem::getChildDirectories(const std::string& parentDirId) const
+{
+    std::vector<DirectoryInfo> result;
+    for (const auto& d : directories)
+    {
+        if (d->getParentDirId() == parentDirId)
+        {
+            result.push_back(DirectoryInfo{ d->getDirId(), d->getName(), d->getParentDirId() });
+        }
+    }
+    return result;
+}
+
+std::vector<FileInfo> FileSystem::getChildFiles(const std::string& dirId) const
+{
+    std::vector<FileInfo> result;
+    for (const auto& f : files)
+    {
+        if (f->getDirId() == dirId)
+        {
+            result.push_back(FileInfo{ f->getFileId(), f->getName(), f->getOwnerPID() });
+        }
+    }
+    return result;
+}
+
+std::string FileSystem::findChildDirectoryIdByName(const std::string& parentDirId, const std::string& name) const
+{
+    for (const auto& d : directories)
+    {
+        if (d->getParentDirId() == parentDirId && d->getName() == name)
+            return d->getDirId();
+    }
+    return "";
+}
+
+FileInfo FileSystem::findChildFileByName(const std::string& dirId, const std::string& name) const
+{
+    for (const auto& f : files)
+    {
+        if (f->getDirId() == dirId && f->getName() == name)
+            return FileInfo{ f->getFileId(), f->getName(), f->getOwnerPID() };
+    }
+    return FileInfo{ "", "", "" };
+}
+
+// ============================================================
+// FILE OPERATIONS
+// ============================================================
+
 std::string FileSystem::createFile(const std::string& ownerPID,
                                    const std::string& name,
                                    int sizeInBlocks,
                                    int currentTick,
-                                   const std::string& dirPath)
+                                   const std::string& dirId)
 {
     if (sizeInBlocks <= 0) return "";
+
+    // Default to root if caller didn't specify a directory.
+    std::string targetDirId = dirId.empty() ? ROOT_DIR_ID : dirId;
+
+    if (!directoryExists(targetDirId)) return ""; // target directory must exist
+
+    // Reject duplicate sibling names (matches a subdirectory of the same name too).
+    for (const auto& f : files)
+    {
+        if (f->getDirId() == targetDirId && f->getName() == name)
+            return "";
+    }
+    for (const auto& d : directories)
+    {
+        if (d->getParentDirId() == targetDirId && d->getName() == name)
+            return "";
+    }
 
     std::vector<int> chosen = strategy->findBlocks(blocks, sizeInBlocks);
     if (chosen.empty()) return "";   // Disk full or fragmented
@@ -64,10 +309,12 @@ std::string FileSystem::createFile(const std::string& ownerPID,
     for (int blockId : chosen)
     {
         blocks[blockId].allocate(fileId);
+        std::vector<char> zeros(blockSize, 0);
+        disk->writeBlock(blockId, zeros);
     }
 
     files.push_back(std::make_unique<File>(
-        fileId, name, ownerPID, dirPath, sizeInBlocks, chosen, currentTick
+        fileId, name, ownerPID, targetDirId, sizeInBlocks, chosen, currentTick
     ));
 
     return fileId;
@@ -85,9 +332,13 @@ bool FileSystem::deleteFile(const std::string& fileId)
         openFileTable.end()
     );
 
-    // Free all its disk blocks (note: underlying bytes on disk.img are
-    // left as-is — they become garbage until the next allocation
-    // overwrites them, same as a real filesystem)
+    // Wipe underlying disk blocks with zeros
+    for (int blockId : file->getAllocatedBlocks())
+    {
+        std::vector<char> zeros(blockSize, 0);
+        disk->writeBlock(blockId, zeros);
+    }
+
     freeBlocks(file->getAllocatedBlocks());
 
     // Remove the file entry
@@ -132,11 +383,51 @@ bool FileSystem::closeFile(const std::string& fileId, const std::string& byPID)
     return true;
 }
 
+bool FileSystem::moveFile(const std::string& fileId, const std::string& newDirId)
+{
+    File* file = findFile(fileId);
+    if (!file) return false;
+
+    if (!directoryExists(newDirId)) return false;
+
+    // Reject a move that collides with an existing name in the destination.
+    for (const auto& f : files)
+    {
+        if (f->getFileId() != fileId &&
+            f->getDirId() == newDirId &&
+            f->getName() == file->getName())
+            return false;
+    }
+    for (const auto& d : directories)
+    {
+        if (d->getParentDirId() == newDirId && d->getName() == file->getName())
+            return false;
+    }
+
+    file->setDirId(newDirId);
+    return true;
+}
+
 bool FileSystem::renameFile(const std::string& fileId, const std::string& newName)
 {
     if (newName.empty()) return false;
     File* file = findFile(fileId);
     if (!file) return false;
+
+    // Reject a rename that collides with an existing sibling.
+    for (const auto& f : files)
+    {
+        if (f->getFileId() != fileId &&
+            f->getDirId() == file->getDirId() &&
+            f->getName() == newName)
+            return false;
+    }
+    for (const auto& d : directories)
+    {
+        if (d->getParentDirId() == file->getDirId() && d->getName() == newName)
+            return false;
+    }
+
     file->setName(newName);
     return true;
 }
@@ -349,13 +640,20 @@ void FileSystem::reset()
     files.clear();
     openFileTable.clear();
     nextFileId = 1;
+
+    // Drop every directory except the permanent root, and reset the counter.
+    directories.erase(
+        std::remove_if(directories.begin(), directories.end(),
+            [&](const std::unique_ptr<Directory>& d) { return d->getDirId() != ROOT_DIR_ID; }),
+        directories.end()
+    );
+    nextDirId = 1;
+
     for (auto& b : blocks)
     {
         b.deallocate();
     }
-    // Note: disk.img is NOT zeroed here — freed/reset blocks simply
-    // become unreferenced; their old bytes persist until overwritten
-    // by a future allocation, same as a real disk.
+    // Note: disk.img is NOT zeroed here — freed/reset blocks simply become unreferenced; their old bytes persist until overwritten by a future allocation, same as a real disk.
 }
 
 void FileSystem::compact()
@@ -430,6 +728,22 @@ std::string FileSystem::getSnapshotAsJson() const
     }
     ss << "],";
 
+    // Directories — flat list, each with its real parentDirId.
+    // Every folder is a real row here, including empty ones, so the frontend can rebuild an accurate tree with zero guesswork.
+    ss << "\"directories\":[";
+    for (size_t i = 0; i < directories.size(); i++)
+    {
+        const auto& d = directories[i];
+        ss << "{";
+        ss << "\"dirId\":\"" << d->getDirId() << "\",";
+        ss << "\"name\":\"" << d->getName() << "\",";
+        ss << "\"parentDirId\":\"" << d->getParentDirId() << "\",";
+        ss << "\"createdAt\":" << d->getCreatedAt();
+        ss << "}";
+        if (i + 1 < directories.size()) ss << ",";
+    }
+    ss << "],";
+
     // Files
     ss << "\"files\":[";
     for (size_t i = 0; i < files.size(); i++)
@@ -439,7 +753,7 @@ std::string FileSystem::getSnapshotAsJson() const
         ss << "\"fileId\":\"" << f->getFileId() << "\",";
         ss << "\"name\":\"" << f->getName() << "\",";
         ss << "\"ownerPID\":\"" << f->getOwnerPID() << "\",";
-        ss << "\"dirPath\":\"" << f->getDirPath() << "\",";
+        ss << "\"dirId\":\"" << f->getDirId() << "\",";
         ss << "\"sizeInBlocks\":" << f->getSizeInBlocks() << ",";
         ss << "\"sizeInBytes\":" << f->getSizeInBytes() << ",";
         ss << "\"isOpen\":" << (f->isOpen() ? "true" : "false") << ",";

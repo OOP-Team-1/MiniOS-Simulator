@@ -1,9 +1,17 @@
+import path from 'path';
+import { fileURLToPath } from 'url';
 import fs from 'fs';
 
-// Hardcode the exact Windows path to the executable
-export const ENGINE_BINARY_PATH = "C:\\Users\\marri\\Downloads\\MiniOS-Simulator\\engine\\build\\minios_engine.exe";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-if (!fs.existsSync(ENGINE_BINARY_PATH)) {
-    console.error(`\nCRITICAL ERROR: Engine not found at ${ENGINE_BINARY_PATH}`);
-    console.error("Please verify you compiled it successfully.\n");
-}
+const candidates = [
+    path.resolve(__dirname, '../../../engine/build/main.exe'),
+    path.resolve(__dirname, '../../../engine/build/Debug/main.exe'),
+    path.resolve(__dirname, '../../../engine/build/Release/main.exe'),
+    path.resolve(__dirname, '../../../engine/build/minios_engine.exe'),
+    path.resolve(__dirname, '../../../engine/build/main'),
+    path.resolve(__dirname, '../../../engine/build/minios_engine')
+];
+
+export const ENGINE_BINARY_PATH = candidates.find(p => fs.existsSync(p)) || candidates[0];

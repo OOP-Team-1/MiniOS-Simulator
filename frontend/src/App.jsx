@@ -30,14 +30,23 @@ const INITIAL_WINDOWS = [
   { id: 'settings', title: 'Settings', isOpen: false, isMinimized: false, isMaximized: false, zIndex: 0, x: 205, y: 130, w: 760, h: 500 },
 ];
 
-const FILE_ROOT = '/home/student/projects';
-const INITIAL_FILES = [
-  { name: 'desktop', type: 'dir', size: '—', modified: '2026-10-10', parent: FILE_ROOT },
-  { name: 'documents', type: 'dir', size: '—', modified: '2026-10-10', parent: FILE_ROOT },
-  { name: 'README.md', type: 'file', size: '1.2 KB', modified: '2026-10-06', parent: FILE_ROOT, content: '# MINIOS\n\nA desktop operating-system simulator built as a CSE project.\n' },
-];
+const getFileKey = (file) => file.id;
 
-const getFileKey = (file) => `${file.parent}/${file.name}`;
+function getDisplayPath(dirId, directories) {
+  if (!dirId || dirId === 'D0') return '/';
+  const map = new Map(directories.map((d) => [d.dirId, d]));
+  const segments = [];
+  let curr = dirId;
+  let guard = 0;
+  while (curr && curr !== 'D0' && guard < directories.length + 1) {
+    const d = map.get(curr);
+    if (!d) break;
+    segments.unshift(d.name);
+    curr = d.parentDirId;
+    guard++;
+  }
+  return '/' + segments.join('/');
+}
 
 const APP_TONES = {
   'process-manager': 'text-sky-300 bg-sky-400/10 border-sky-300/20',
@@ -189,13 +198,21 @@ export default function App() {
   const [newProcName, setNewProcName] = useState('');
   const [newProcBurst, setNewProcBurst] = useState('10');
   const [newProcPriority, setNewProcPriority] = useState('1');
+  const [newProcMemory, setNewProcMemory] = useState('10');
+  const [newProcArrival, setNewProcArrival] = useState('0');
+
   const [schedAlgo, setSchedAlgo] = useState('RR');
   const [timeQuantum, setTimeQuantum] = useState(3);
   
   const [termInput, setTermInput] = useState('');
   const [termHistory, setTermHistory] = useState(['MINIOS shell 2.4.0', 'Type help to see supported commands.', '']);
-  const [currentPath, setCurrentPath] = useState(FILE_ROOT);
-  const [files, setFiles] = useState(INITIAL_FILES);
+  const [fsDirectories, setFsDirectories] = useState([
+    { dirId: 'D0', name: '/', parentDirId: '', createdAt: 0 }
+  ]);
+  const [fsFiles, setFsFiles] = useState([]);
+  const [currentDirId, setCurrentDirId] = useState('D0');
+  const [memoryStats, setMemoryStats] = useState(null);
+  const [diskStats, setDiskStats] = useState(null);
   const [newItemType, setNewItemType] = useState(null);
   const [newItemName, setNewItemName] = useState('');
   const [contextMenu, setContextMenu] = useState(null);
@@ -237,6 +254,11 @@ export default function App() {
         
         setProcesses(translatedProcesses);
 
+        // Auto-clear hidden PIDs when simulation resets to tick 0 with no processes
+        if (data.tick === 0 && translatedProcesses.length === 0) {
+          setHiddenPIDs(new Set());
+        }
+
         // AUTO-PAUSE LOGIC
         // If all visible processes have hit TERMINATED, send a pause command to stop backend clock
         const visibleProcs = translatedProcesses.filter(p => !hiddenPIDs.has(p.pid));
@@ -253,6 +275,33 @@ export default function App() {
               averageTurnaround: data.metrics.averageTurnaround
             });
         }
+      }
+      if (data.memory) {
+        setMemoryStats(data.memory);
+      }
+
+      // 2. FileSystem telemetry (Directories + Files)
+      if (data.filesystem) {
+        setDiskStats(data.filesystem);
+        const dirs = data.filesystem.directories || [];
+        const files = data.filesystem.files || [];
+        setFsDirectories(dirs);
+        setFsFiles(files);
+
+        // Keep current directory if it still exists, otherwise navigate to home/root
+        setCurrentDirId((prevDirId) => {
+          if (dirs.some((d) => d.dirId === prevDirId)) return prevDirId;
+          const homeDir = dirs.find((d) => d.name === 'student' || d.name === 'nitw' || d.name === 'home');
+          return homeDir ? homeDir.dirId : 'D0';
+        });
+      }
+    });
+
+    socket.on('file:read_result', (data) => {
+      if (data && data.ok) {
+        setFilePreview((prev) => (prev && prev.id === data.fileId ? { ...prev, draft: data.content ?? '' } : prev));
+      } else if (data && !data.ok) {
+        setToast(`File read failed for ${data.fileId}.`);
       }
     });
 
@@ -379,10 +428,42 @@ export default function App() {
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const filteredApps = useMemo(() => INITIAL_APPS.filter((app) => `${app.title} ${app.subtitle}`.toLowerCase().includes(normalizedSearch)), [normalizedSearch]);
   const filteredWindows = useMemo(() => windows.filter((win) => win.isOpen && win.title.toLowerCase().includes(normalizedSearch)), [windows, normalizedSearch]);
-  const visibleFiles = useMemo(() => files.filter((file) => file.parent === currentPath).sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1)), [files, currentPath]);
+  const visibleFiles = useMemo(() => {
+    const childDirs = fsDirectories
+      .filter((d) => d.parentDirId === currentDirId)
+      .map((d) => ({
+        id: d.dirId,
+        name: d.name,
+        type: 'dir',
+        size: '—',
+        modified: d.createdAt ? `Tick ${d.createdAt}` : 'Init',
+        parentDirId: d.parentDirId,
+        raw: d,
+      }));
+
+    const childFiles = fsFiles
+      .filter((f) => f.dirId === currentDirId)
+      .map((f) => ({
+        id: f.fileId,
+        name: f.name,
+        type: 'file',
+        size: `${f.sizeInBytes || 0} B (${f.sizeInBlocks} blk)`,
+        modified: f.lastAccessedAt ? `Tick ${f.lastAccessedAt}` : 'Tick 0',
+        parentDirId: f.dirId,
+        ownerPID: f.ownerPID,
+        raw: f,
+      }));
+
+    return [...childDirs, ...childFiles].sort((a, b) =>
+      a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1
+    );
+  }, [fsDirectories, fsFiles, currentDirId]);
+
+  const currentPathDisplay = useMemo(() => getDisplayPath(currentDirId, fsDirectories), [currentDirId, fsDirectories]);
+  const currentFolderObj = fsDirectories.find((d) => d.dirId === currentDirId);
+  const currentFolderLabel = currentFolderObj ? currentFolderObj.name : 'root';
+  const isAtFileRoot = currentDirId === 'D0';
   const dockApps = useMemo(() => INITIAL_APPS.filter((app) => app.id !== 'settings' && (pinnedApps.includes(app.id) || windows.some((win) => win.id === app.id && win.isOpen))), [pinnedApps, windows]);
-  const currentFolderLabel = currentPath === FILE_ROOT ? 'projects' : currentPath.split('/').pop();
-  const isAtFileRoot = currentPath === FILE_ROOT;
 
   // Window Management functions
   const openWindow = (id) => {
@@ -430,21 +511,25 @@ export default function App() {
     const name = newProcName.trim();
     const burst = Number.parseInt(newProcBurst, 10);
     const priority = Number.parseInt(newProcPriority, 10);
+    const memory = Number.parseInt(newProcMemory, 10);
+    const arrival = Number.parseInt(newProcArrival, 10);
     
     if (!name) return setToast('Enter a process name first.');
     if (!Number.isFinite(burst) || burst < 1) return setToast('Burst time must be at least 1.');
+    if (!Number.isFinite(memory) || memory < 1) return setToast('Memory must be at least 1 MB.');
 
     socket.emit('cmd:add_process', { 
       name: name, 
       burst: burst, 
       priority: Number.isFinite(priority) ? priority : 1,
-      arrival: 0,
-      memory: 10
+      arrival: Number.isFinite(arrival) ? arrival : 0,
+      memory: memory
     });
 
     setNewProcName('');
     setToast(`Requested creation of process: ${name}`);
   };
+
 
   const terminateProcess = (pid) => {
     socket.emit('cmd:kill_process', { pid });
@@ -474,20 +559,26 @@ export default function App() {
 
   // File Manager & Terminal Functions
   const goUpDirectory = () => {
-    if (currentPath === FILE_ROOT) return;
-    const parent = currentPath.slice(0, currentPath.lastIndexOf('/'));
-    setCurrentPath(parent.length < FILE_ROOT.length ? FILE_ROOT : parent);
-    setSelectedFileKeys([]);
+    if (currentDirId === 'D0') return;
+    const currentFolder = fsDirectories.find((d) => d.dirId === currentDirId);
+    if (currentFolder && currentFolder.parentDirId) {
+      setCurrentDirId(currentFolder.parentDirId);
+      setSelectedFileKeys([]);
+    }
   };
+
   const openFileEntry = (file) => {
     setContextMenu(null);
     setSelectedFileKeys([getFileKey(file)]);
     if (file.type === 'dir') {
-      setCurrentPath(`${currentPath}/${file.name}`);
+      setCurrentDirId(file.id);
       setSelectedFileKeys([]);
       return;
     }
-    setFilePreview({ ...file, draft: file.content || '' });
+    const ownerPID = file.ownerPID || 'USER';
+    socket.emit('cmd:file_open', { fileId: file.id, byPID: ownerPID });
+    socket.emit('cmd:file_read', { fileId: file.id, byPID: ownerPID });
+    setFilePreview({ ...file, draft: 'Loading content from simulated disk...' });
   };
   const openFileContextMenu = (event, entry = null) => {
     event.preventDefault(); event.stopPropagation();
@@ -546,86 +637,67 @@ export default function App() {
   const beginCreateItem = (type) => {
     setContextMenu(null); setContextNewOpen(false); setNewItemType(type); setNewItemName('');
   };
-  const buildClipboardBundles = (keys) => {
-    const roots = files.filter((file) => keys.includes(getFileKey(file)));
-    return roots.map((root) => {
-      const sourcePath = `${root.parent}/${root.name}`;
-      const records = files.filter((file) => getFileKey(file) === getFileKey(root) || file.parent === sourcePath || file.parent.startsWith(`${sourcePath}/`));
-      return { root: { ...root }, sourcePath, sourceParent: root.parent, records: records.map((file) => ({ ...file })) };
-    });
-  };
   const copyOrCutSelectedFiles = (operation) => {
     const keys = contextMenu?.selectedKeys || selectedFileKeys;
-    const bundles = buildClipboardBundles(keys);
-    if (!bundles.length) return;
-    setFileClipboard({ operation, bundles });
-    setContextMenu(null); setToast(`${operation === 'copy' ? 'Copied' : 'Cut'} ${bundles.length} item(s).`);
-  };
-  const uniquePastedName = (originalName, parentPath, occupiedNames, isCopy) => {
-    if (!occupiedNames.has(originalName.toLowerCase())) return originalName;
-    let base = originalName, extension = '';
-    if (base.lastIndexOf('.') > 0 && base.lastIndexOf('.') < base.length - 1) {
-      extension = base.slice(base.lastIndexOf('.'));
-      base = base.slice(0, base.lastIndexOf('.'));
-    }
-    let counter = 1, candidate;
-    do {
-      counter += 1;
-      candidate = isCopy ? `${base} - Copy${counter > 2 ? ` (${counter - 1})` : ''}${extension}` : `${base} (${counter})${extension}`;
-    } while (occupiedNames.has(candidate.toLowerCase()));
-    return candidate;
+    const items = visibleFiles.filter((item) => keys.includes(item.id));
+    if (!items.length) return;
+    setFileClipboard({ operation, items, sourceDirId: currentDirId });
+    setContextMenu(null);
+    setToast(`${operation === 'copy' ? 'Copied' : 'Cut'} ${items.length} item(s).`);
   };
   const pasteFiles = () => {
-    if (!fileClipboard?.bundles?.length) return;
-    const { operation, bundles } = fileClipboard;
-    if (bundles.some((bundle) => bundle.root.type === 'dir' && (currentPath === bundle.sourcePath || currentPath.startsWith(`${bundle.sourcePath}/`)))) {
-      setContextMenu(null); return setToast('Cannot paste a folder into itself.');
-    }
-    if (operation === 'cut' && bundles.every((bundle) => bundle.sourceParent === currentPath)) {
-      setContextMenu(null); return setToast('Items are already in this folder.');
-    }
-    let nextFiles = [...files];
-    const occupiedNames = new Set(files.filter((file) => file.parent === currentPath).map((file) => file.name.toLowerCase()));
-    const newlyPasted = [];
-    for (const bundle of bundles) {
-      const root = operation === 'cut' ? nextFiles.find((file) => getFileKey(file) === getFileKey(bundle.root)) : bundle.root;
-      if (!root) continue;
-      const sourcePath = `${root.parent}/${root.name}`;
-      const records = operation === 'cut' ? nextFiles.filter((file) => getFileKey(file) === getFileKey(root) || file.parent === sourcePath || file.parent.startsWith(`${sourcePath}/`)) : bundle.records;
-      const destinationName = uniquePastedName(root.name, currentPath, occupiedNames, operation === 'copy');
-      occupiedNames.add(destinationName.toLowerCase());
-      const destinationPath = `${currentPath}/${destinationName}`;
-      const rootKey = getFileKey(root);
-      const mapped = records.map((record) => {
-        if (getFileKey(record) === rootKey) return { ...record, name: destinationName, parent: currentPath, modified: new Date().toISOString().slice(0, 10) };
-        const suffix = record.parent.startsWith(sourcePath) ? record.parent.slice(sourcePath.length) : '';
-        return { ...record, parent: `${destinationPath}${suffix}`, modified: new Date().toISOString().slice(0, 10) };
-      });
-      newlyPasted.push(...mapped);
-    }
+    if (!fileClipboard?.items?.length) return;
+    const { operation, items, sourceDirId } = fileClipboard;
+
     if (operation === 'cut') {
-      nextFiles = nextFiles.filter((file) => {
-        for (const bundle of bundles) {
-          const sourcePath = bundle.sourcePath;
-          if (getFileKey(file) === `${bundle.sourceParent}/${bundle.root.name}` || file.parent === sourcePath || file.parent.startsWith(`${sourcePath}/`)) return false;
+      if (sourceDirId === currentDirId) {
+        setContextMenu(null);
+        return setToast('Items are already in this folder.');
+      }
+      items.forEach((item) => {
+        if (item.type === 'dir') {
+          socket.emit('cmd:dir_move', { dirId: item.id, newParentDirId: currentDirId });
+        } else {
+          socket.emit('cmd:file_move', { fileId: item.id, newDirId: currentDirId });
         }
-        return true;
       });
       setFileClipboard(null);
+      setContextMenu(null);
+      setToast(`Moved ${items.length} item(s).`);
+    } else {
+      items.forEach((item) => {
+        if (item.type === 'file') {
+          socket.emit('cmd:file_create', { ownerPID: 'USER', name: `copy_${item.name}`, sizeInBlocks: 1, dirId: currentDirId });
+        } else {
+          socket.emit('cmd:dir_create', { name: `copy_${item.name}`, parentDirId: currentDirId });
+        }
+      });
+      setContextMenu(null);
+      setToast(`Copied ${items.length} item(s).`);
     }
-    setFiles([...nextFiles, ...newlyPasted]);
-    setSelectedFileKeys(newlyPasted.filter((file) => file.parent === currentPath).map(getFileKey));
-    setContextMenu(null); setToast(`${operation === 'copy' ? 'Pasted copy of' : 'Moved'} ${newlyPasted.filter((file) => file.parent === currentPath).length} item(s).`);
+  };
+  
+  const deleteItemRecursive = (item) => {
+    if (!item) return;
+    if (item.type === 'file') {
+      socket.emit('cmd:file_delete', { fileId: item.id });
+    } else {
+      const deleteSubtree = (dirId) => {
+        fsFiles.filter((f) => f.dirId === dirId).forEach((cf) => socket.emit('cmd:file_delete', { fileId: cf.fileId }));
+        fsDirectories.filter((d) => d.parentDirId === dirId).forEach((cd) => deleteSubtree(cd.dirId));
+        socket.emit('cmd:dir_delete', { dirId });
+      };
+      deleteSubtree(item.id);
+    }
   };
   const deleteSelectedFiles = () => {
     const keys = contextMenu?.selectedKeys || selectedFileKeys;
-    const roots = files.filter((file) => keys.includes(getFileKey(file)));
-    if (!roots.length) return;
-    setFiles((previous) => previous.filter((file) => !roots.some((root) => {
-      const rootPath = `${root.parent}/${root.name}`;
-      return getFileKey(file) === getFileKey(root) || file.parent === rootPath || file.parent.startsWith(`${rootPath}/`);
-    })));
-    setSelectedFileKeys([]); setContextMenu(null); setToast(`Deleted ${roots.length} selected item(s).`);
+    const itemsToDelete = visibleFiles.filter((item) => keys.includes(item.id));
+    if (!itemsToDelete.length) return;
+    itemsToDelete.forEach((item) => deleteItemRecursive(item));
+    setSelectedFileKeys([]);
+    setContextMenu(null);
+    setToast(`Deleted ${itemsToDelete.length} item(s).`);
   };
   const handleWallpaperUpload = (event) => {
     const imageFile = event.target.files?.[0];
@@ -647,39 +719,86 @@ export default function App() {
       case 'help': output += '\nCommands: help, clear, ps, ls, cd <folder|..>, mkdir <name>, touch <name>, top, mem, uname, date, pwd, spawn <name> <burst>, kill <pid>'; break;
       case 'clear': setTermHistory(['MINIOS shell 2.4.0', '']); setTermInput(''); return;
       case 'ps': output += '\nPID  STATE      PRI  BURST  REMAIN  NAME\n' + processes.filter(p => !hiddenPIDs.has(p.pid)).map((p) => `${String(p.pid).padEnd(4)} ${p.state.padEnd(10)} ${String(p.priority).padEnd(4)} ${String(`${p.burst}u`).padEnd(6)} ${String(`${p.remaining}u`).padEnd(6)} ${p.name}`).join('\n'); break;
-      case 'ls': output += '\n' + files.filter((file) => file.parent === currentPath).map((file) => `${file.type === 'dir' ? 'd' : '-'}  ${file.name}`).join('\n'); break;
+      case 'ls':
+        output += '\n' + (visibleFiles.length ? visibleFiles.map((file) => `${file.type === 'dir' ? 'd' : '-'}  ${file.name}`).join('\n') : '(empty directory)');
+        break;
       case 'top': output += `\nSimulated CPU activity: ${Math.min(96, 12 + activeProcesses * 11)}%\nRunnable processes: ${activeProcesses}\nTelemetry values are simulated, not host-machine measurements.`; break;
-      case 'mem': output += '\nSimulated physical memory: 4096 MB\nAllocated: 1842 MB\nPage size: 4 KB\nPage faults: 2'; break;
+      case 'mem': output += `\nSimulated physical memory: ${memoryStats?.totalMemory || 100} MB\nAllocated: ${memoryStats?.usedMemory || 0} MB\nFree: ${memoryStats?.freeMemory || 100} MB\nExternal Fragmentation: ${Number(memoryStats?.externalFragmentation || 0).toFixed(1)}%`; break;
       case 'uname': output += '\nMINIOS 2.4.0 nitw-cse x86_64-simulated'; break;
       case 'date': output += `\n${currentTime.toString()}`; break;
-      case 'pwd': output += `\n${currentPath}`; break;
+      case 'pwd':
+        output += `\n${currentPathDisplay}`;
+        break;
       case 'cd': {
-        const destination = args[1];
-        if (!destination) { output += `\n${currentPath}`; break; }
-        if (destination === '..') {
-          const parent = currentPath.slice(0, currentPath.lastIndexOf('/'));
-          setCurrentPath(parent.length < FILE_ROOT.length ? FILE_ROOT : parent);
-          output += `\nChanged directory.`; break;
+        const rawDest = (args[1] || '').trim();
+        const destination = rawDest.replace(/\/+$/, ''); // Strip trailing slash
+        if (!destination || destination === '~' || destination === '/') {
+          setCurrentDirId('D0');
+          output += '\nChanged directory to /';
+          break;
         }
-        const target = files.find((file) => file.parent === currentPath && file.type === 'dir' && file.name === destination);
-        if (target) { setCurrentPath(`${currentPath}/${target.name}`); output += `\nChanged directory to ${destination}.`; } else output += `\ncd: no such directory: ${destination}`;
+        if (destination === '..') {
+          const currentFolder = fsDirectories.find((d) => d.dirId === currentDirId);
+          if (currentFolder && currentFolder.parentDirId) {
+            setCurrentDirId(currentFolder.parentDirId);
+            output += '\nChanged directory to ..';
+          } else {
+            output += '\nAlready at root /';
+          }
+          break;
+        }
+        const target = visibleFiles.find((f) => f.type === 'dir' && f.name === destination);
+        if (target) {
+          setCurrentDirId(target.id);
+          output += `\nChanged directory to ${destination}.`;
+        } else {
+          output += `\ncd: no such directory: ${rawDest}`;
+        }
         break;
       }
-      case 'mkdir':
+
+      case 'mkdir': {
+        const name = args[1];
+        if (!name) { output += '\nUsage: mkdir <name>'; break; }
+        socket.emit('cmd:dir_create', { name, parentDirId: currentDirId });
+        output += `\nCreated folder ${name}.`;
+        break;
+      }
       case 'touch': {
         const name = args[1];
-        if (!name) { output += `\nUsage: ${args[0]} <name>`; break; }
-        if (files.some((file) => file.parent === currentPath && file.name === name)) { output += `\nAn item named ${name} already exists.`; break; }
-        const type = args[0] === 'mkdir' ? 'dir' : 'file';
-        setFiles((previous) => [...previous, { name, type, size: type === 'dir' ? '—' : '0.0 KB', modified: new Date().toISOString().slice(0, 10), parent: currentPath, content: '' }]);
-        output += `\nCreated ${type === 'dir' ? 'folder' : 'file'} ${name}.`; break;
+        if (!name) { output += '\nUsage: touch <name>'; break; }
+        socket.emit('cmd:file_create', { ownerPID: 'USER', name, sizeInBlocks: 1, dirId: currentDirId });
+        output += `\nCreated file ${name}.`;
+        break;
+      }
+      case 'cat': {
+        const name = args[1];
+        if (!name) { output += '\nUsage: cat <filename>'; break; }
+        const target = visibleFiles.find((f) => f.type === 'file' && f.name === name);
+        if (!target) { output += `\ncat: ${name}: No such file`; break; }
+        openFileEntry(target);
+        output += `\nOpened ${name} in editor preview.`;
+        break;
+      }
+      case 'rm': {
+        const isR = args[1] === '-r' || args[1] === '-rf';
+        const name = isR ? args[2] : args[1];
+        if (!name) { output += '\nUsage: rm [-r] <name>'; break; }
+        const target = visibleFiles.find((f) => f.name === name);
+        if (!target) { output += `\nrm: cannot remove '${name}': No such file or directory`; break; }
+        if (target.type === 'dir' && !isR) { output += `\nrm: cannot remove '${name}': Is a directory (use -r)`; break; }
+        deleteItemRecursive(target);
+        output += `\nRemoved ${name}.`;
+        break;
       }
       case 'spawn': {
         const name = args[1] || 'task_node';
         const burst = Number.parseInt(args[2], 10) || 8;
+        const memory = Number.parseInt(args[3], 10) || 10;
+        const priority = Number.parseInt(args[4], 10) || 1;
         if (burst < 1) { output += '\nBurst time must be at least 1.'; break; }
-        socket.emit('cmd:add_process', { name, burst, priority: 1, arrival: 0, memory: 10 });
-        output += `\nSent spawn signal to engine for ${name}, burst ${burst}.`; break;
+        socket.emit('cmd:add_process', { name, burst, priority, arrival: 0, memory });
+        output += `\nSpawned ${name} (Burst: ${burst}u, Memory: ${memory} MB, Priority: ${priority}).`; break;
       }
       case 'kill': {
         const pidStr = String(args[1]);
@@ -700,27 +819,49 @@ export default function App() {
     const name = newItemName.trim();
     if (!name || !newItemType) return;
     if (name === '.' || name === '..' || name.includes('/')) return setToast('Use a simple name without slashes.');
-    if (files.some((file) => file.parent === currentPath && file.name.toLowerCase() === name.toLowerCase())) return setToast('An item with that name already exists in this folder.');
-    const type = newItemType;
-    setFiles((previous) => [...previous, { name, type, size: type === 'dir' ? '—' : '0.0 KB', modified: new Date().toISOString().slice(0, 10), parent: currentPath, content: '' }]);
-    setNewItemName(''); setNewItemType(null); setToast(`Created ${type === 'dir' ? 'folder' : 'file'} ${name}.`);
+    if (visibleFiles.some((f) => f.name.toLowerCase() === name.toLowerCase())) {
+      return setToast('An item with that name already exists in this directory.');
+    }
+
+    if (newItemType === 'dir') {
+      socket.emit('cmd:dir_create', { name, parentDirId: currentDirId });
+      setToast(`Created folder "${name}".`);
+    } else {
+      socket.emit('cmd:file_create', { ownerPID: 'USER', name, sizeInBlocks: 1, dirId: currentDirId });
+      setToast(`Created file "${name}".`);
+    }
+    setNewItemName('');
+    setNewItemType(null);
   };
   const saveFilePreview = () => {
     if (!filePreview) return;
-    const draft = filePreview.draft || '';
-    setFiles((previous) => previous.map((file) => file.parent === filePreview.parent && file.name === filePreview.name ? { ...file, content: draft, size: `${Math.max(0.1, draft.length / 1024).toFixed(1)} KB`, modified: new Date().toISOString().slice(0, 10) } : file));
-    setFilePreview(null); setToast(`Saved ${filePreview.name}.`);
+    const ownerPID = filePreview.ownerPID || 'USER';
+    socket.emit('cmd:file_open', { fileId: filePreview.id, byPID: ownerPID });
+    socket.emit('cmd:file_write', {
+      fileId: filePreview.id,
+      byPID: ownerPID,
+      content: filePreview.draft || '',
+    });
+    socket.emit('cmd:file_close', { fileId: filePreview.id, byPID: ownerPID });
+    setFilePreview(null);
+    setToast(`Saved changes to ${filePreview.name}.`);
   };
+
+  const closeFilePreview = () => {
+    if (filePreview) {
+      const ownerPID = filePreview.ownerPID || 'USER';
+      socket.emit('cmd:file_close', { fileId: filePreview.id, byPID: ownerPID });
+    }
+    setFilePreview(null);
+  };
+  
   const deleteFile = (entry) => {
     if (!entry) return;
-    const targetPath = `${entry.parent}/${entry.name}`;
-    setFiles((previous) => previous.filter((file) => {
-      if (file.parent === entry.parent && file.name === entry.name) return false;
-      return !(file.parent === targetPath || file.parent.startsWith(`${targetPath}/`));
-    }));
-    setSelectedFileKeys((previous) => previous.filter((key) => key !== getFileKey(entry) && !key.startsWith(`${targetPath}/`)));
-    setToast(`Deleted ${entry.name}${entry.type === 'dir' ? ' and its contents' : ''}.`);
+    deleteItemRecursive(entry);
+    setSelectedFileKeys((previous) => previous.filter((key) => key !== getFileKey(entry)));
+    setToast(`Deleted ${entry.name}.`);
   };
+
   useEffect(() => {
     const handleFileShortcuts = (event) => {
       if (activeWindow !== 'file-manager') return;
@@ -735,7 +876,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handleFileShortcuts);
     return () => window.removeEventListener('keydown', handleFileShortcuts);
-  }, [activeWindow, selectedFileKeys, fileClipboard, contextMenu, files, currentPath]);
+  }, [activeWindow, selectedFileKeys, fileClipboard, contextMenu, visibleFiles, currentDirId]);
 
   // CSS and Theme configurations
   const themeClass = theme === 'aurora' ? 'from-[#17605e] via-[#245274] to-[#483d78]' : theme === 'sunset' ? 'from-[#874b5b] via-[#59436f] to-[#2b5272]' : 'from-[#24506d] via-[#354777] to-[#533d70]';
@@ -849,12 +990,14 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
-                  <form onSubmit={addProcess} className="mt-5 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                    <form onSubmit={addProcess} className="mt-5 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
                     <div className="mb-3 flex items-center gap-2"><Plus className="h-4 w-4 text-slate-400" /><h3 className="text-xs font-semibold text-slate-200">Create process</h3></div>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_110px_110px_auto]">
-                      <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Process name</span><input value={newProcName} onChange={(e) => setNewProcName(e.target.value)} placeholder="e.g. matrix_multiply" className="field w-full" /></label>
-                      <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Burst (units)</span><input type="number" min="1" value={newProcBurst} onChange={(e) => setNewProcBurst(e.target.value)} className="field w-full" /></label>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_90px_90px_90px_90px_auto]">
+                      <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Name</span><input value={newProcName} onChange={(e) => setNewProcName(e.target.value)} placeholder="e.g. worker_job" className="field w-full" /></label>
+                      <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Burst (u)</span><input type="number" min="1" value={newProcBurst} onChange={(e) => setNewProcBurst(e.target.value)} className="field w-full" /></label>
+                      <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">RAM (MB)</span><input type="number" min="1" value={newProcMemory} onChange={(e) => setNewProcMemory(e.target.value)} className="field w-full" /></label>
                       <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Priority</span><input type="number" min="0" value={newProcPriority} onChange={(e) => setNewProcPriority(e.target.value)} className="field w-full" /></label>
+                      <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Arrival</span><input type="number" min="0" value={newProcArrival} onChange={(e) => setNewProcArrival(e.target.value)} className="field w-full" /></label>
                       <button type="submit" className="self-end rounded-lg bg-slate-100 px-4 py-2.5 text-xs font-semibold text-slate-900 transition hover:bg-white"><Plus className="mr-1 inline h-3.5 w-3.5" />Create</button>
                     </div>
                   </form>
@@ -894,7 +1037,7 @@ export default function App() {
                   <div className="min-h-0 flex-1 overflow-y-auto p-4 leading-relaxed text-emerald-100/90">
                     {termHistory.map((line, index) => <pre key={index} className="whitespace-pre-wrap break-words font-mono">{line || ' '}</pre>)}
                     <form onSubmit={handleTerminalSubmit} className="flex items-baseline gap-2 font-mono leading-relaxed">
-                      <span className="shrink-0 text-sky-300">student@minios:{currentPath.startsWith('/home/student') ? currentPath.replace('/home/student', '~') : currentPath}$</span>
+                      <span className="shrink-0 text-sky-300">student@minios:{currentPathDisplay}$</span>
                       <input autoComplete="off" spellCheck={false} value={termInput} onChange={(e) => setTermInput(e.target.value)} aria-label="Terminal command" className="min-w-0 flex-1 border-0 bg-transparent p-0 font-mono text-[11px] text-slate-100 outline-none ring-0 focus:border-0 focus:outline-none focus:ring-0" placeholder="" />
                     </form>
                     <div ref={terminalEndRef} />
@@ -912,8 +1055,8 @@ export default function App() {
                     <button onClick={goUpDirectory} disabled={isAtFileRoot} className="rounded-md p-1.5 text-slate-300 transition hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-30" title="Go to parent folder"><ArrowUp className="h-3.5 w-3.5" /></button>
                     <Folder className="h-4 w-4 text-amber-200" />
                     <span className="text-[11px] text-slate-400">Location</span>
-                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-200">{currentPath}</span>
-                    <button onClick={() => setCurrentPath(FILE_ROOT)} className="rounded-md px-2 py-1 text-[10px] text-slate-400 transition hover:bg-white/[0.07] hover:text-slate-100" title="Return to project root">Home</button>
+                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-200">{currentPathDisplay}</span>
+                    <button onClick={() => setCurrentDirId('D0')} className="rounded-md px-2 py-1 text-[10px] text-slate-400 transition hover:bg-white/[0.07] hover:text-slate-100" title="Return to root directory">Root (/)</button>
                   </div>
                   <div ref={fileListRef} className="relative min-h-[250px] overflow-x-auto rounded-xl border border-white/[0.09] bg-black/[0.08]" onMouseDown={beginFileSelection} onContextMenu={(event) => openFileContextMenu(event)}>
                     <table className="w-full min-w-[620px] text-left text-xs">
@@ -927,7 +1070,7 @@ export default function App() {
                             <td className="px-3.5 py-3 text-slate-400">{file.type === 'dir' ? 'Folder' : 'File'}</td>
                             <td className="px-3.5 py-3 font-mono text-slate-400">{file.size}</td>
                             <td className="px-3.5 py-3 font-mono text-slate-400">{file.modified}</td>
-                            <td className="px-3.5 py-3 text-right"><button onClick={(event) => { event.stopPropagation(); deleteFile(file); }} title={`Delete ${file.name}`} className="rounded-md p-1.5 text-slate-500 transition hover:bg-rose-400/[0.1] hover:text-rose-300"><Trash2 className="h-3.5 w-3.5" /></button></td>
+                            <td className="px-3.5 py-3 text-right"><button onClick={(event) => { event.stopPropagation(); deleteItemRecursive(file); setToast(`Deleted ${file.name}`); }} title={`Delete ${file.name}`} className="rounded-md p-1.5 text-slate-500 transition hover:bg-rose-400/[0.1] hover:text-rose-300"><Trash2 className="h-3.5 w-3.5" /></button></td>
                           </tr>;
                         })}
                         {!visibleFiles.length && <tr><td colSpan="5" className="py-12 text-center text-slate-500"><FolderOpen className="mx-auto mb-2 h-6 w-6 text-slate-600" />This folder is empty.<p className="mt-1 text-[10px]">Right-click and choose New to add a file or folder.</p></td></tr>}
@@ -1067,9 +1210,9 @@ export default function App() {
       {filePreview && (
         <div className="absolute inset-0 z-[126] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
           <div className="flex max-h-[82vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-white/[0.16] bg-[#1b2028]/[0.98] shadow-[0_24px_80px_rgba(0,0,0,0.5)]">
-            <div className="flex items-center justify-between border-b border-white/[0.09] px-4 py-3"><div className="flex min-w-0 items-center gap-2.5"><FileText className="h-4 w-4 shrink-0 text-sky-200" /><div className="min-w-0"><p className="truncate text-xs font-semibold text-slate-100">{filePreview.name}</p><p className="mt-0.5 truncate text-[10px] text-slate-500">{filePreview.parent}/{filePreview.name} · virtual file</p></div></div><button onClick={() => setFilePreview(null)} aria-label="Close file" className="rounded-md p-1.5 text-slate-400 transition hover:bg-white/[0.08] hover:text-white"><X className="h-4 w-4" /></button></div>
+            <div className="flex items-center justify-between border-b border-white/[0.09] px-4 py-3"><div className="flex min-w-0 items-center gap-2.5"><FileText className="h-4 w-4 shrink-0 text-sky-200" /><div className="min-w-0"><p className="truncate text-xs font-semibold text-slate-100">{filePreview.name}</p><p className="mt-0.5 truncate text-[10px] text-slate-500">ID: {filePreview.id} · Owner: {filePreview.ownerPID || 'USER'} · Backed by engine/data/disk.img</p></div></div><button onClick={closeFilePreview} aria-label="Close file" className="rounded-md p-1.5 text-slate-400 transition hover:bg-white/[0.08] hover:text-white"><X className="h-4 w-4" /></button></div>
             <textarea value={filePreview.draft} onChange={(event) => setFilePreview((previous) => ({ ...previous, draft: event.target.value }))} spellCheck={false} className="min-h-[280px] flex-1 resize-y bg-[#0d1117] p-4 font-mono text-xs leading-relaxed text-slate-200 outline-none placeholder:text-slate-600" placeholder="This file is empty. Start typing…" />
-            <div className="flex items-center justify-between gap-3 border-t border-white/[0.08] px-4 py-3"><span className="text-[10px] text-slate-500">Changes are stored in the browser simulation only.</span><div className="flex gap-2"><button onClick={() => setFilePreview(null)} className="rounded-lg border border-white/[0.1] px-3.5 py-2 text-xs text-slate-300 hover:bg-white/[0.06]">Cancel</button><button onClick={saveFilePreview} className="rounded-lg bg-slate-100 px-4 py-2 text-xs font-semibold text-slate-900 hover:bg-white">Save changes</button></div></div>
+            <div className="flex items-center justify-between gap-3 border-t border-white/[0.08] px-4 py-3"><span className="text-[10px] text-slate-500">Changes are stored in the browser simulation only.</span><div className="flex gap-2"><button onClick={closeFilePreview} className="rounded-lg border border-white/[0.1] px-3.5 py-2 text-xs text-slate-300 hover:bg-white/[0.06]">Cancel</button><button onClick={saveFilePreview} className="rounded-lg bg-slate-100 px-4 py-2 text-xs font-semibold text-slate-900 hover:bg-white">Save changes</button></div></div>
           </div>
         </div>
       )}

@@ -1,77 +1,140 @@
 
-// MiniOS Kernel + CommandPrompt Integration Test Harness
-// C++17
-
-#include "../include/Kernel.h"
-#include "../include/FCFSScheduler.h"
-#include "../include/FirstFit.h"
-#include "../include/AllocationStrategy.h"
-#include "../include/ContiguousAllocation.h"
-#include "../include/FileSystem.h"
-#include "../include/MemoryManager.h"
-#include "../include/PagingManager.h"
+// ============================================================
+// MINI OS SIMULATOR — ENGINE ENTRY POINT
+//
+// This binary is spawned as a long-lived child process by the
+// Node.js backend (see backend/src/engine/processManager.js).
+// It reads newline-terminated commands from stdin, mutates
+// simulation state via SimulationEngine, and writes one JSON
+// line per command to stdout:
+//
+//   - Most commands: the full telemetry snapshot (SimulationEngine::getTelemetryJson())
+//   - FILE_READ:      a one-shot {"type":"READ_RESULT",...} line instead
+//
+// This file intentionally contains no interactive/test code —
+// see git history for the previous manual test harness.
+// ============================================================
 
 #include <iostream>
-#include <memory>
-#include <stdexcept>
+#include <sstream>
 #include <string>
+#include <vector>
+#include <memory>
 
-namespace
+#include "../include/SimulationEngine.h"
+#include "../include/MemoryManager.h"
+#include "../include/FileSystem.h"
+
+#include "../include/FirstFit.h"
+#include "../include/BestFit.h"
+#include "../include/WorstFit.h"
+#include "../include/ContiguousAllocation.h"
+
+#include "../include/FCFSScheduler.h"
+#include "../include/SJFScheduler.h"
+#include "../include/SRTFScheduler.h"
+#include "../include/PriorityScheduler.h"
+#include "../include/RoundRobinScheduler.h"
+
+using namespace std;
+
+// ============================================================
+// BASE64 (for FILE_WRITE / FILE_APPEND payloads and READ_RESULT content)
+// ============================================================
+
+static const std::string BASE64_CHARS =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789+/";
+
+static std::string base64Encode(const std::string& input)
 {
-    // ========================================================
-    // SYSTEM CONFIGURATION
-    // ========================================================
+    std::string out;
+    int val = 0, valb = -6;
 
-    constexpr int TOTAL_MEMORY_MB = 128;
-
-    constexpr int TOTAL_DISK_BLOCKS = 32;
-    constexpr int DISK_BLOCK_SIZE = 4;
-
-    constexpr int PHYSICAL_MEMORY_KB = 16;
-    constexpr int PAGE_SIZE_KB = 4;
-
-    // ========================================================
-    // INITIALIZE THE KERNEL'S DEPENDENCIES
-    // ========================================================
-
-    struct MiniOSDependencies
+    for (unsigned char c : input)
     {
-        /*
-         * Declaration order matters.
-         *
-         * Members are destroyed in reverse declaration order.
-         * Therefore, the managers are destroyed before their
-         * allocation strategies, which they reference.
-         */
-
-        FirstFit memoryStrategy;
-        MemoryManager memoryManager;
-
-        ContiguousAllocation fileStrategy;
-        FileSystem fileSystem;
-
-        PagingManager pagingManager;
-        FCFSScheduler scheduler;
-
-        MiniOSDependencies()
-            : memoryStrategy(),
-              memoryManager(TOTAL_MEMORY_MB, memoryStrategy),
-              fileStrategy(),
-              fileSystem(
-                  TOTAL_DISK_BLOCKS,
-                  DISK_BLOCK_SIZE,
-                  fileStrategy,
-                  "data/disk.img"
-              ),
-              pagingManager(
-                  PHYSICAL_MEMORY_KB,
-                  PAGE_SIZE_KB,
-                  ReplacementPolicy::LRU
-              ),
-              scheduler()
+        val = (val << 8) + c;
+        valb += 8;
+        while (valb >= 0)
         {
+            out.push_back(BASE64_CHARS[(val >> valb) & 0x3F]);
+            valb -= 6;
         }
-    };
+    }
+
+    if (valb > -6)
+    {
+        out.push_back(BASE64_CHARS[((val << 8) >> (valb + 8)) & 0x3F]);
+    }
+
+    while (out.size() % 4)
+    {
+        out.push_back('=');
+    }
+
+    return out;
+}
+
+static std::string base64Decode(const std::string& input)
+{
+    std::vector<int> table(256, -1);
+    for (int i = 0; i < 64; i++)
+    {
+        table[static_cast<unsigned char>(BASE64_CHARS[i])] = i;
+    }
+
+    std::string out;
+    int val = 0, valb = -8;
+
+    for (unsigned char c : input)
+    {
+        if (table[c] == -1) break; // stop at padding '=' or invalid char
+        val = (val << 6) + table[c];
+        valb += 6;
+        if (valb >= 0)
+        {
+            out.push_back(static_cast<char>((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+
+    return out;
+}
+
+static std::string jsonEscape(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s)
+    {
+        switch (c)
+        {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:   out += c;      break;
+        }
+    }
+    return out;
+}
+
+// ============================================================
+// COMMAND TOKENIZER
+// ============================================================
+
+static std::vector<std::string> tokenize(const std::string& line)
+{
+    std::vector<std::string> tokens;
+    std::istringstream iss(line);
+    std::string tok;
+    while (iss >> tok)
+    {
+        tokens.push_back(tok);
+    }
+    return tokens;
 }
 
 // ============================================================
@@ -80,189 +143,258 @@ namespace
 
 int main()
 {
-    try
+    // ------------------------------------------------------
+    // Concrete strategy instances. We keep one of each alive
+    // for the whole process lifetime and just repoint which
+    // one is active via setStrategy()/setScheduler().
+    // ------------------------------------------------------
+
+    FirstFit firstFit;
+    BestFit bestFit;
+    WorstFit worstFit;
+    ContiguousAllocation fileStrategy;
+
+    FCFSScheduler fcfs;
+    SJFScheduler sjf;
+    SRTFScheduler srtf;
+    PriorityScheduler priority;
+    RoundRobinScheduler roundRobin(2); // default quantum = 2
+
+    // ------------------------------------------------------
+    // Core managers — fixed configuration at startup.
+    // (100 MB RAM, FirstFit; 32 blocks x 4 KB disk, Contiguous)
+    // ------------------------------------------------------
+
+    MemoryManager memoryManager(100, firstFit);
+    FileSystem fileSystem(32, 512, fileStrategy, "data/disk.img");
+
+    SimulationEngine engine(memoryManager, fileSystem, roundRobin);
+    engine.setCurrentSchedulerName("RR", 2);
+    engine.setCurrentAllocName("FirstFit");
+
+    // ------------------------------------------------------
+    // COMMAND LOOP
+    // ------------------------------------------------------
+
+    std::string line;
+
+    while (std::getline(std::cin, line))
     {
-        // ----------------------------------------------------
-        // 1. Initialize OS components and their dependencies
-        // ----------------------------------------------------
+        if (line.empty()) continue;
 
-        MiniOSDependencies dependencies;
+        std::vector<std::string> tok = tokenize(line);
+        if (tok.empty()) continue;
 
-        // ----------------------------------------------------
-        // 2. Create the Kernel
-        // ----------------------------------------------------
+        const std::string& cmd = tok[0];
+        bool emitTelemetry = true; // most commands fall through to a telemetry print
 
-        Kernel kernel(
-            dependencies.scheduler,
-            dependencies.memoryManager,
-            dependencies.fileSystem,
-            dependencies.pagingManager,
-            MemoryMode::CONTIGUOUS,
-            "nitw",
-            "minios"
-        );
-
-        // ----------------------------------------------------
-        // 3. Start the terminal integration test
-        // ----------------------------------------------------
-
-        std::cout
-            << "============================================\n"
-            << "       MiniOS Kernel Integration Test\n"
-            << "============================================\n\n";
-
-        std::cout
-            << "MiniOS Kernel initialized successfully.\n"
-            << "Memory mode: CONTIGUOUS\n\n";
-
-        std::cout
-            << "Type 'help' to see available commands.\n"
-            << "Special test commands: step, run, exit\n\n";
-
-        std::cout
-            << "Examples:\n"
-            << "  spawn Editor 2 0 5 20\n"
-            << "  spawn Browser 1 0 4 30\n"
-            << "  ps\n"
-            << "  top\n"
-            << "  step\n"
-            << "  run\n\n";
-
-        // ----------------------------------------------------
-        // 4. Read commands and route them through the Kernel
-        // ----------------------------------------------------
-
-        std::string command;
-
-        while (true)
+        try
         {
-            // The terminal is accessed through the Kernel.
-            std::cout << kernel.getCommandPrompt().getPrompt();
-
-            if (!std::getline(std::cin, command))
+            if (cmd == "EXIT")
             {
                 break;
             }
-
-            if (command.empty())
+            else if (cmd == "STEP")
             {
-                continue;
+                engine.step();
             }
-
-            // ------------------------------------------------
-            // EXIT
-            // ------------------------------------------------
-
-            if (command == "exit")
+            else if (cmd == "STATE")
             {
-                (void)kernel.executeTerminalCommand(command);
-                break;
+                // no-op mutation — just fall through and print current telemetry
             }
-
-            // ------------------------------------------------
-            // STEP: execute one scheduling step
-            // ------------------------------------------------
-
-            if (command == "step")
+            else if (cmd == "RESET")
             {
-                kernel.getCommandPrompt().recordExternalCommand(command);
-
-                try
-                {
-                    if (kernel.runStep())
-                    {
-                        std::cout
-                            << "Executed one scheduling step.\n"
-                            << "Simulated time: "
-                            << kernel.getCurrentTime()
-                            << " time unit(s).\n";
-                    }
-                    else
-                    {
-                        std::cout
-                            << "No runnable processes remain.\n"
-                            << "Simulated time: "
-                            << kernel.getCurrentTime()
-                            << " time unit(s).\n";
-                    }
-                }
-                catch (const std::exception& error)
-                {
-                    std::cout << "step: " << error.what() << '\n';
-                }
-
-                continue;
+                engine.reset();
             }
-
-            // ------------------------------------------------
-            // RUN: execute scheduling until no further progress
-            // ------------------------------------------------
-
-            if (command == "run")
+            else if (cmd == "COMPACT")
             {
-                kernel.getCommandPrompt().recordExternalCommand(command);
-
-                try
-                {
-                    kernel.run();
-
-                    std::cout
-                        << "Simulation finished.\n"
-                        << "Simulated time: "
-                        << kernel.getCurrentTime()
-                        << " time unit(s).\n";
-                }
-                catch (const std::exception& error)
-                {
-                    std::cout << "run: " << error.what() << '\n';
-                }
-
-                continue;
+                memoryManager.compact();
             }
-
-            // ------------------------------------------------
-            // ALL OTHER COMMANDS GO THROUGH THE KERNEL
-            // ------------------------------------------------
-
-            try
+            else if (cmd == "DISK_COMPACT")
             {
-                const std::string output =
-                    kernel.executeTerminalCommand(command);
+                engine.compactDisk();
+            }
+            else if (cmd == "ADD" && tok.size() >= 6)
+            {
+                // ADD <name> <priority> <arrival> <burst> <memory>
+                engine.addProcess(
+                    tok[1],
+                    std::stoi(tok[2]),
+                    std::stoi(tok[3]),
+                    std::stoi(tok[4]),
+                    std::stoi(tok[5])
+                );
+            }
+            else if (cmd == "KILL" && tok.size() >= 2)
+            {
+                engine.killProcess(tok[1]);
+            }
+            else if (cmd == "SET_SCHEDULER" && tok.size() >= 2)
+            {
+                // SET_SCHEDULER <FCFS|SJF|SRTF|PRIORITY|RR> [quantum]
+                const std::string& type = tok[1];
 
-                if (!output.empty())
+                if (type == "FCFS")
                 {
-                    std::cout << output;
-
-                    if (output.back() != '\n' &&
-                        output != "\033[2J\033[1;1H")
-                    {
-                        std::cout << '\n';
-                    }
+                    engine.setScheduler(fcfs);
+                    engine.setCurrentSchedulerName("FCFS", 0);
+                }
+                else if (type == "SJF")
+                {
+                    engine.setScheduler(sjf);
+                    engine.setCurrentSchedulerName("SJF", 0);
+                }
+                else if (type == "SRTF")
+                {
+                    engine.setScheduler(srtf);
+                    engine.setCurrentSchedulerName("SRTF", 0);
+                }
+                else if (type == "PRIORITY")
+                {
+                    engine.setScheduler(priority);
+                    engine.setCurrentSchedulerName("PRIORITY", 0);
+                }
+                else if (type == "RR")
+                {
+                    int quantum = (tok.size() >= 3) ? std::stoi(tok[2]) : 2;
+                    roundRobin = RoundRobinScheduler(quantum);
+                    engine.setScheduler(roundRobin);
+                    engine.setCurrentSchedulerName("RR", quantum);
                 }
             }
-            catch (const std::exception& error)
+            else if (cmd == "SET_ALLOC" && tok.size() >= 2)
             {
-                std::cout << "minios: "
-                          << error.what()
-                          << '\n';
+                // SET_ALLOC <FirstFit|BestFit|WorstFit>
+                const std::string& type = tok[1];
+
+                if (type == "FirstFit")
+                {
+                    memoryManager.setStrategy(firstFit);
+                    engine.setCurrentAllocName("FirstFit");
+                }
+                else if (type == "BestFit")
+                {
+                    memoryManager.setStrategy(bestFit);
+                    engine.setCurrentAllocName("BestFit");
+                }
+                else if (type == "WorstFit")
+                {
+                    memoryManager.setStrategy(worstFit);
+                    engine.setCurrentAllocName("WorstFit");
+                }
+            }
+            // ── Directory commands ──────────────────────────────────────
+            else if (cmd == "DIR_CREATE" && tok.size() >= 2)
+            {
+                // DIR_CREATE <name> [parentDirId]
+                // Omitted parentDirId defaults to the root directory (D0).
+                std::string parentDirId = (tok.size() >= 3) ? tok[2] : "";
+                engine.createDirectory(tok[1], parentDirId);
+            }
+            else if (cmd == "DIR_DELETE" && tok.size() >= 2)
+            {
+                // DIR_DELETE <dirId> — fails if not empty, see FileSystem::deleteDirectory
+                engine.deleteDirectory(tok[1]);
+            }
+            else if (cmd == "DIR_RENAME" && tok.size() >= 3)
+            {
+                // DIR_RENAME <dirId> <newName>
+                engine.renameDirectory(tok[1], tok[2]);
+            }
+            else if (cmd == "DIR_MOVE" && tok.size() >= 3)
+            {
+                // DIR_MOVE <dirId> <newParentDirId>
+                engine.moveDirectory(tok[1], tok[2]);
+            }
+            // ── File commands ───────────────────────────────────────────
+            else if (cmd == "FILE_CREATE" && tok.size() >= 4)
+            {
+                // FILE_CREATE <ownerPID> <name> <sizeInBlocks> [dirId]
+                // Omitted dirId defaults to the root directory (D0).
+                std::string dirId = (tok.size() >= 5) ? tok[4] : "";
+                engine.createFile(tok[1], tok[2], std::stoi(tok[3]), dirId);
+            }
+            else if (cmd == "FILE_DELETE" && tok.size() >= 2)
+            {
+                engine.deleteFile(tok[1]);
+            }
+            else if (cmd == "FILE_OPEN" && tok.size() >= 3)
+            {
+                engine.openFile(tok[1], tok[2]);
+            }
+            else if (cmd == "FILE_CLOSE" && tok.size() >= 3)
+            {
+                engine.closeFile(tok[1], tok[2]);
+            }
+            else if (cmd == "FILE_RENAME" && tok.size() >= 3)
+            {
+                engine.renameFile(tok[1], tok[2]);
+            }
+            else if (cmd == "FILE_MOVE" && tok.size() >= 3)
+            {
+                // FILE_MOVE <fileId> <newDirId>
+                engine.moveFile(tok[1], tok[2]);
+            }
+            else if (cmd == "FILE_READ" && tok.size() >= 3)
+            {
+                // FILE_READ <fileId> <byPID>
+                // Emits a dedicated READ_RESULT line instead of telemetry.
+                bool ok = false;
+                std::string content = engine.readFile(tok[1], tok[2], ok);
+
+                std::ostringstream ss;
+                ss << "{\"type\":\"READ_RESULT\","
+                   << "\"fileId\":\"" << jsonEscape(tok[1]) << "\","
+                   << "\"pid\":\"" << jsonEscape(tok[2]) << "\","
+                   << "\"ok\":" << (ok ? "true" : "false") << ",";
+
+                if (ok)
+                {
+                    ss << "\"content\":\"" << base64Encode(content) << "\"";
+                }
+                else
+                {
+                    ss << "\"content\":null";
+                }
+
+                ss << "}";
+
+                std::cout << ss.str() << std::endl;
+                emitTelemetry = false;
+            }
+            else if (cmd == "FILE_WRITE" && tok.size() >= 3)
+            {
+                // FILE_WRITE <fileId> <byPID> <base64Content>
+                std::string content = (tok.size() >= 4) ? base64Decode(tok[3]) : "";
+                engine.writeFile(tok[1], tok[2], content);
+            }
+            else if (cmd == "FILE_APPEND" && tok.size() >= 4)
+            {
+                // FILE_APPEND <fileId> <byPID> <base64Content>
+                std::string content = base64Decode(tok[3]);
+                engine.appendFile(tok[1], tok[2], content);
+            }
+            else
+            {
+                // Unknown or malformed command — ignore, still emit telemetry
+                // so the frontend's state doesn't silently go stale.
             }
         }
+        catch (const std::exception& e)
+        {
+            // Never let a bad command kill the engine process — report via
+            // stdout as a structured error line, then keep the loop alive.
+            std::ostringstream ss;
+            ss << "{\"type\":\"ERROR\",\"message\":\"" << jsonEscape(e.what()) << "\"}";
+            std::cout << ss.str() << std::endl;
+            emitTelemetry = false;
+        }
 
-        // ----------------------------------------------------
-        // 5. End the test session
-        // ----------------------------------------------------
-
-        std::cout << "\nMiniOS test session ended.\n";
-
-        return 0;
+        if (emitTelemetry)
+        {
+            std::cout << engine.getTelemetryJson() << std::endl;
+        }
     }
-    catch (const std::exception& error)
-    {
-        std::cerr
-            << "\nFailed to initialize MiniOS:\n"
-            << error.what()
-            << '\n';
 
-        return 1;
-    }
+    return 0;
 }

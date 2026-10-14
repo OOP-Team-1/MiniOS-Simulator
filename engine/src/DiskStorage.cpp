@@ -43,30 +43,24 @@ void DiskStorage::ensureFileExists()
     bool exists = fs::exists(p);
     std::uintmax_t currentSize = exists ? fs::file_size(p) : 0;
 
-    if (!exists || currentSize < requiredSize)
+    if (!exists || currentSize != requiredSize)
     {
-        // Create (or extend) the file to the required size.
-        // Opening with "out | binary" on a non-existing file creates it.
-        std::ofstream out(filePath, std::ios::out | std::ios::binary | std::ios::app);
+        std::ofstream out(filePath, std::ios::out | std::ios::binary | std::ios::trunc);
         if (!out.is_open())
         {
             throw std::runtime_error("DiskStorage: failed to create backing file: " + filePath);
         }
 
-        std::uintmax_t bytesToAdd = requiredSize - currentSize;
-        if (bytesToAdd > 0)
-        {
-            const std::size_t chunkSize = 4096;
-            std::vector<char> zeros(chunkSize, 0);
+        const std::size_t chunkSize = 4096;
+        std::vector<char> zeros(chunkSize, 0);
 
-            std::uintmax_t remaining = bytesToAdd;
-            while (remaining > 0)
-            {
-                std::size_t writeNow =
-                    static_cast<std::size_t>(remaining < chunkSize ? remaining : chunkSize);
-                out.write(zeros.data(), static_cast<std::streamsize>(writeNow));
-                remaining -= writeNow;
-            }
+        std::uintmax_t remaining = requiredSize;
+        while (remaining > 0)
+        {
+            std::size_t writeNow =
+                static_cast<std::size_t>(remaining < chunkSize ? remaining : chunkSize);
+            out.write(zeros.data(), static_cast<std::streamsize>(writeNow));
+            remaining -= writeNow;
         }
 
         out.close();

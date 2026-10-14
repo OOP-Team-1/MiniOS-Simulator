@@ -47,34 +47,43 @@ export function startEngine(onTelemetry, onError, onRestart, onReadResult, onEng
         }
     );
 
-    engineProcess.stderr.on('data', () => {});
+    engineProcess.stderr.on('data', (chunk) => {
+        console.error(`[Engine stderr] ${chunk.toString()}`);
+    });
 
-    engineProcess.on('error', () => {
-        engineProcess = null;
-        if (!isShuttingDown) {
-            setTimeout(() => startEngine(), 1000);
-        }
+
+    engineProcess.on('error', (err) => {
+        console.error(`[Engine] Process error: ${err.message}`);
     });
 
     engineProcess.on('close', (code) => {
         console.log(`[Engine] Process exited with code ${code}`);
         engineProcess = null;
-        if (!isShuttingDown) {
+        if (!isShuttingDown && !isRestarting) {
             if (restartCallback) restartCallback();
             setTimeout(() => startEngine(), 1000);
         }
     });
+
 }
 
 export function sendCommand(cmd) {
-    if (engineProcess && !engineProcess.killed && engineProcess.stdin) {
-        engineProcess.stdin.write(`${cmd}\n`);
+    if (engineProcess && engineProcess.stdin && engineProcess.stdin.writable) {
+        try {
+            engineProcess.stdin.write(`${cmd}\n`);
+        } catch (err) {
+            console.error(`[Engine] Stdin write error: ${err.message}`);
+        }
     }
 }
 
 export function triggerRestart() {
     if (isRestarting || isShuttingDown) return;
     isRestarting = true;
+    if (engineProcess) {
+        engineProcess.kill();
+        engineProcess = null;
+    }
     if (restartCallback) restartCallback();
     setTimeout(() => {
         isRestarting = false;

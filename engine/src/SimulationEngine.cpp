@@ -47,21 +47,69 @@ Process& SimulationEngine::addProcess(
     );
 }
 
+// ── Directory operation wrappers ────────────────────────────────────────────
+
+std::string SimulationEngine::createDirectory(const std::string& name, const std::string& parentDirId)
+{
+    std::string targetParent = parentDirId.empty() ? FileSystem::getRootDirId() : parentDirId;
+    std::string dirId = fileSystem->createDirectory(name, targetParent, currentTick);
+
+    if (!dirId.empty())
+        log("Directory created: " + dirId + " (\"" + name + "\") under " + targetParent);
+    else
+        log("Directory creation FAILED for \"" + name + "\" under " + targetParent +
+            " (parent missing or name already in use)");
+
+    return dirId;
+}
+
+bool SimulationEngine::deleteDirectory(const std::string& dirId)
+{
+    bool ok = fileSystem->deleteDirectory(dirId);
+    if (ok)
+        log("Directory deleted: " + dirId);
+    else
+        log("Directory delete FAILED: " + dirId + " (not found, root, or not empty)");
+    return ok;
+}
+
+bool SimulationEngine::renameDirectory(const std::string& dirId, const std::string& newName)
+{
+    bool ok = fileSystem->renameDirectory(dirId, newName);
+    if (ok)
+        log("Directory renamed: " + dirId + " -> \"" + newName + "\"");
+    else
+        log("Directory rename FAILED: " + dirId + " (not found, root, empty name, or name collision)");
+    return ok;
+}
+
+bool SimulationEngine::moveDirectory(const std::string& dirId, const std::string& newParentDirId)
+{
+    bool ok = fileSystem->moveDirectory(dirId, newParentDirId);
+    if (ok)
+        log("Directory moved: " + dirId + " -> under " + newParentDirId);
+    else
+        log("Directory move FAILED: " + dirId + " -> " + newParentDirId +
+            " (not found, root, cycle, or name collision)");
+    return ok;
+}
+
 // ── File operation wrappers ───────────────────────────────────────────────────
 
 std::string SimulationEngine::createFile(const std::string& ownerPID,
                                          const std::string& name,
                                          int sizeInBlocks,
-                                         const std::string& dirPath)
+                                         const std::string& dirId)
 {
-    std::string fileId = fileSystem->createFile(ownerPID, name, sizeInBlocks, currentTick, dirPath);
+    std::string targetDirId = dirId.empty() ? FileSystem::getRootDirId() : dirId;
+    std::string fileId = fileSystem->createFile(ownerPID, name, sizeInBlocks, currentTick, targetDirId);
 
     if (!fileId.empty())
         log("File created: " + fileId + " (\"" + name + "\") by " + ownerPID +
-            " | " + std::to_string(sizeInBlocks) + " blocks at " + dirPath);
+            " | " + std::to_string(sizeInBlocks) + " blocks in " + targetDirId);
     else
         log("File creation FAILED for \"" + name + "\" by " + ownerPID +
-            " (disk full or fragmented)");
+            " (disk full/fragmented, directory missing, or name already in use)");
 
     return fileId;
 }
@@ -93,6 +141,17 @@ bool SimulationEngine::closeFile(const std::string& fileId, const std::string& b
         log("File closed: " + fileId + " by " + byPID);
     else
         log("File close FAILED: " + fileId + " (not found or not open by " + byPID + ")");
+    return ok;
+}
+
+bool SimulationEngine::moveFile(const std::string& fileId, const std::string& newDirId)
+{
+    bool ok = fileSystem->moveFile(fileId, newDirId);
+    if (ok)
+        log("File moved: " + fileId + " -> " + newDirId);
+    else
+        log("File move FAILED: " + fileId + " -> " + newDirId +
+            " (file or directory not found, or name collision)");
     return ok;
 }
 
@@ -152,7 +211,7 @@ bool SimulationEngine::renameFile(const std::string& fileId, const std::string& 
     if (ok)
         log("File renamed: " + fileId + " -> \"" + newName + "\"");
     else
-        log("File rename FAILED: " + fileId + " (not found or empty name)");
+        log("File rename FAILED: " + fileId + " (not found, empty name, or name collision)");
     return ok;
 }
 
@@ -292,6 +351,18 @@ void SimulationEngine::reset()
     fileSystem->reset();
     scheduler->reset();
     log("Simulation reset to initial state");
+}
+
+bool SimulationEngine::killProcess(const std::string& pid)
+{
+    Process* p = processManager.getProcess(pid);
+    if (!p) return false;
+    p->setState(ProcessState::TERMINATED);
+    memoryManager->deallocate(pid);
+    fileSystem->handleProcessTermination(pid);
+    log("Process " + pid + " terminated");
+    checkPendingProcesses();
+    return true;
 }
 
 int SimulationEngine::getCurrentTick() const

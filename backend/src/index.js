@@ -68,6 +68,10 @@ startEngine(
 
 registerSocketEvents(io);
 
+// Prime initial engine telemetry on startup so REST GET /api/state works immediately
+import { sendCommand } from './engine/processManager.js';
+setTimeout(() => sendCommand("STATE"), 500);
+
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
     console.log(`===========================================`);
@@ -84,4 +88,7 @@ const handleShutdown = () => {
 
 process.on('SIGINT', handleShutdown);
 process.on('SIGTERM', handleShutdown);
-process.on('uncaughtException', handleShutdown);
+process.on('uncaughtException', (err) => {
+    console.error('[Backend] Uncaught Exception:', err);
+    handleShutdown(1);
+});

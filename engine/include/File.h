@@ -9,7 +9,7 @@ private:
     std::string fileId;
     std::string name;
     std::string ownerPID;
-    std::string dirPath;
+    std::string dirId;    // real foreign key into FileSystem's directory table
     int sizeInBlocks;    // capacity: number of blocks currently allocated
     int sizeInBytes;     // logical length: actual bytes of content
     bool open;
@@ -21,7 +21,7 @@ public:
     File(const std::string& fileId,
          const std::string& name,
          const std::string& ownerPID,
-         const std::string& dirPath,
+         const std::string& dirId,
          int sizeInBlocks,
          const std::vector<int>& allocatedBlocks,
          int createdAt);
@@ -29,7 +29,7 @@ public:
     std::string getFileId() const;
     std::string getName() const;
     std::string getOwnerPID() const;
-    std::string getDirPath() const;
+    std::string getDirId() const;
     int getSizeInBlocks() const;
     int getSizeInBytes() const;
     bool isOpen() const;
@@ -42,4 +42,5 @@ public:
     void setAllocatedBlocks(const std::vector<int>& blocks);
     void setName(const std::string& newName);
     void setSizeInBytes(int bytes);
+    void setDirId(const std::string& newDirId);
 };

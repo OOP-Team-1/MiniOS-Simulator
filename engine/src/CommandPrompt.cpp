@@ -1,111 +1,328 @@
 #include "../include/CommandPrompt.h"
 #include "../include/FileSystem.h"
-#include <sstream>
+
 #include <iostream>
+#include <sstream>
 #include <algorithm>
 #include <ctime>
 
-CommandPrompt::CommandPrompt(const std::string& user, const std::string& host, FileSystem* fileSystem) 
-    : username(user), hostname(host), currentPathString("~"), fs(fileSystem) {
-    
-    // Create initial directory structure for the simulation using the actual FileSystem
+// ============================================================
+// CONSTRUCTOR & INITIAL DIRECTORY SETUP
+// ============================================================
+
+CommandPrompt::CommandPrompt(const std::string& user, const std::string& host, FileSystem* fileSystem)
+    : username(user), hostname(host), fs(fileSystem)
+{
+    std::string rootId = fs->getRootDirId();
+
+    // 1. Ensure /home exists under root (D0)
+    std::string homeParentId = fs->findChildDirectoryIdByName(rootId, "home");
+    if (homeParentId.empty()) {
+        homeParentId = fs->createDirectory("home", rootId, 0);
+    }
+
+    // 2. Ensure /home/<username> exists
+    homeDirId = fs->findChildDirectoryIdByName(homeParentId, username);
+    if (homeDirId.empty()) {
+        homeDirId = fs->createDirectory(username, homeParentId, 0);
+    }
+
+    // Fall back to root if home creation failed
+    if (homeDirId.empty()) {
+        homeDirId = rootId;
+    }
+
+    currentDirId = homeDirId;
+
+    // 3. Populate default standard user directories under ~/
     std::vector<std::string> defaultDirs = {
         "Desktop", "Documents", "Downloads", "Music", "Pictures", 
         "Public", "Templates", "Videos", "linux-lab", "snap"
     };
 
     for (const auto& dir : defaultDirs) {
-        fs->createFile("SYSTEM", ".dir_marker", 1, 0, "~/" + dir);
+        if (fs->findChildDirectoryIdByName(homeDirId, dir).empty()) {
+            fs->createDirectory(dir, homeDirId, 0);
+        }
     }
-    // Ensure ~/linux-lab/notes directory exists for CLI usage
-    fs->createFile("SYSTEM", ".dir_marker", 1, 0, "~/linux-lab/notes");
 
-    std::string f1 = fs->createFile("SYSTEM", "Computer Organization and Architecture.pdf", 1, 0, "~/Downloads");
-    std::string f2 = fs->createFile("SYSTEM", "code_1.140.0-1790759618_amd64.deb", 1, 0, "~/Downloads");
-    std::string f3 = fs->createFile("SYSTEM", "java-swing-concepts.pdf", 1, 0, "~/Downloads");
+    // 4. Ensure ~/linux-lab/notes exists
+    std::string linuxLabId = fs->findChildDirectoryIdByName(homeDirId, "linux-lab");
+    if (!linuxLabId.empty()) {
+        if (fs->findChildDirectoryIdByName(linuxLabId, "notes").empty()) {
+            fs->createDirectory("notes", linuxLabId, 0);
+        }
+    }
 
-    if (!f1.empty()) writeFileContent(f1, "SYSTEM", "%PDF-1.4\n1 0 obj\n<< /Title (COA Notes) >>\nendobj\n");
-    if (!f2.empty()) writeFileContent(f2, "SYSTEM", "!<arch>\ndebian-binary   1580000000  0     0     100644  4         `\n2.0\n");
-    if (!f3.empty()) writeFileContent(f3, "SYSTEM", "Java Swing Concepts:\n- JFrame\n- JPanel\n- JButton\n");
+    // 5. Populate initial demo files in ~/Downloads
+    std::string downloadsId = fs->findChildDirectoryIdByName(homeDirId, "Downloads");
+    if (!downloadsId.empty()) {
+        if (fs->findChildFileByName(downloadsId, "Computer Organization and Architecture.pdf").fileId.empty()) {
+            std::string f1 = fs->createFile("SYSTEM", "Computer Organization and Architecture.pdf", 1, 0, downloadsId);
+            if (!f1.empty()) writeFileContent(f1, "SYSTEM", "%PDF-1.4\n1 0 obj\n<< /Title (COA Notes) >>\nendobj\n");
+        }
+
+        if (fs->findChildFileByName(downloadsId, "code_1.140.0-1790759618_amd64.deb").fileId.empty()) {
+            std::string f2 = fs->createFile("SYSTEM", "code_1.140.0-1790759618_amd64.deb", 1, 0, downloadsId);
+            if (!f2.empty()) writeFileContent(f2, "SYSTEM", "!<arch>\ndebian-binary   1580000000  0     0     100644  4         `\n2.0\n");
+        }
+
+        if (fs->findChildFileByName(downloadsId, "java-swing-concepts.pdf").fileId.empty()) {
+            std::string f3 = fs->createFile("SYSTEM", "java-swing-concepts.pdf", 1, 0, downloadsId);
+            if (!f3.empty()) writeFileContent(f3, "SYSTEM", "Java Swing Concepts:\n- JFrame\n- JPanel\n- JButton\n");
+        }
+    }
 }
 
 CommandPrompt::~CommandPrompt() {}
 
-std::string CommandPrompt::extractJsonValue(const std::string& json, const std::string& key, size_t startPos) {
-    std::string searchKey = "\"" + key + "\":\"";
-    size_t pos = json.find(searchKey, startPos);
-    if (pos == std::string::npos) return "";
-    pos += searchKey.length();
-    size_t endPos = json.find("\"", pos);
-    return json.substr(pos, endPos - pos);
-}
+// ============================================================
+// PATH RESOLUTION & NAVIGATION HELPERS
+// ============================================================
 
-std::vector<CommandPrompt::FileEntry> CommandPrompt::getFileEntriesInPath(const std::string& path) {
-    std::vector<FileEntry> result;
-    std::string json = fs->getSnapshotAsJson();
-    
-    size_t filesArrayPos = json.find("\"files\":[");
-    if (filesArrayPos == std::string::npos) return result;
+std::string CommandPrompt::resolveDirPath(const std::string& path) const
+{
+    if (path.empty()) {
+        return currentDirId;
+    }
 
-    size_t pos = filesArrayPos;
-    while (true) {
-        pos = json.find("{\"fileId\":", pos);
-        if (pos == std::string::npos) break;
-        
-        std::string fileId = extractJsonValue(json, "fileId", pos);
-        std::string name = extractJsonValue(json, "name", pos);
-        std::string ownerPID = extractJsonValue(json, "ownerPID", pos);
-        std::string dirPath = extractJsonValue(json, "dirPath", pos);
-        
-        if (dirPath == path && name != ".dir_marker") {
-            result.push_back({name, fileId, ownerPID.empty() ? "USER" : ownerPID});
+    std::string clean = stripQuotes(path);
+    if (clean.empty()) return currentDirId;
+
+    std::string curr;
+    size_t startIdx = 0;
+
+    // Absolute path
+    if (clean[0] == '/') {
+        curr = fs->getRootDirId();
+        startIdx = 1;
+    }
+    // Home-relative path
+    else if (clean[0] == '~') {
+        curr = homeDirId;
+        startIdx = 1;
+        if (clean.size() > 1 && clean[1] == '/') {
+            startIdx = 2;
         }
-        pos += 10;
     }
-    return result;
-}
-
-std::vector<std::pair<std::string, std::string>> CommandPrompt::getFilesInPath(const std::string& path) {
-    std::vector<std::pair<std::string, std::string>> result;
-    auto entries = getFileEntriesInPath(path);
-    for (const auto& e : entries) {
-        result.push_back({e.name, e.fileId});
+    // Relative path
+    else {
+        curr = currentDirId;
+        startIdx = 0;
     }
-    return result;
-}
 
-std::vector<std::string> CommandPrompt::getSubdirectories(const std::string& path) {
-    std::vector<std::string> dirs;
-    std::string json = fs->getSnapshotAsJson();
-    
-    size_t filesArrayPos = json.find("\"files\":[");
-    if (filesArrayPos == std::string::npos) return dirs;
+    std::string token;
+    std::stringstream ss(clean.substr(startIdx));
 
-    size_t pos = filesArrayPos;
-    while (true) {
-        pos = json.find("{\"fileId\":", pos);
-        if (pos == std::string::npos) break;
-        
-        std::string dirPath = extractJsonValue(json, "dirPath", pos);
-        
-        std::string prefix = path;
-        if (prefix.back() != '/') prefix += "/";
-        
-        if (dirPath.find(prefix) == 0 && dirPath.length() > prefix.length()) {
-            std::string remaining = dirPath.substr(prefix.length());
-            size_t slashPos = remaining.find("/");
-            std::string subDir = (slashPos == std::string::npos) ? remaining : remaining.substr(0, slashPos);
-            
-            if (std::find(dirs.begin(), dirs.end(), subDir) == dirs.end()) {
-                dirs.push_back(subDir);
+    while (std::getline(ss, token, '/')) {
+        if (token.empty() || token == ".") {
+            continue;
+        }
+
+        if (token == "..") {
+            DirectoryInfo info = fs->getDirectoryInfo(curr);
+            if (!info.parentDirId.empty()) {
+                curr = info.parentDirId;
             }
+            // If parentDirId is empty, we are at root ("D0"); stay at root.
+            continue;
         }
-        pos += 10;
+
+        std::string nextId = fs->findChildDirectoryIdByName(curr, token);
+        if (nextId.empty()) {
+            return ""; // Directory component not found
+        }
+        curr = nextId;
     }
-    return dirs;
+
+    return curr;
 }
 
-std::string CommandPrompt::stripQuotes(const std::string& str) {
+bool CommandPrompt::resolvePathToParentAndName(const std::string& path,
+                                              std::string& outParentDirId,
+                                              std::string& outName) const
+{
+    std::string clean = stripQuotes(path);
+    if (clean.empty()) return false;
+
+    // Strip trailing slashes while length > 1
+    while (clean.size() > 1 && clean.back() == '/') {
+        clean.pop_back();
+    }
+
+    size_t lastSlash = clean.find_last_of('/');
+
+    // Case 1: No slash, parent is currentDirId
+    if (lastSlash == std::string::npos) {
+        outParentDirId = currentDirId;
+        outName = clean;
+        return !outName.empty() && outName != "." && outName != "..";
+    }
+
+    // Case 2: Root-level file or folder, e.g. "/foo"
+    if (lastSlash == 0) {
+        outParentDirId = fs->getRootDirId();
+        outName = clean.substr(1);
+        return !outName.empty() && outName != "." && outName != "..";
+    }
+
+    // Case 3: Nested path, e.g. "a/b/c" or "~/docs/notes.txt"
+    std::string parentPath = clean.substr(0, lastSlash);
+    outName = clean.substr(lastSlash + 1);
+
+    if (outName.empty() || outName == "." || outName == "..") {
+        return false;
+    }
+
+    std::string parentId = resolveDirPath(parentPath);
+    if (parentId.empty()) {
+        return false;
+    }
+
+    outParentDirId = parentId;
+    return true;
+}
+
+std::string CommandPrompt::buildDisplayPath(const std::string& dirId) const
+{
+    if (dirId.empty()) return "?";
+    if (dirId == homeDirId) return "~";
+    if (dirId == fs->getRootDirId()) return "/";
+
+    std::vector<std::string> chain;
+    std::string curr = dirId;
+
+    while (!curr.empty()) {
+        chain.push_back(curr);
+        if (curr == fs->getRootDirId()) break;
+        DirectoryInfo info = fs->getDirectoryInfo(curr);
+        if (info.dirId.empty()) break;
+        curr = info.parentDirId;
+    }
+
+    // Check if homeDirId is an ancestor
+    auto homeIt = std::find(chain.begin(), chain.end(), homeDirId);
+    if (homeIt != chain.end()) {
+        int homeIdx = static_cast<int>(std::distance(chain.begin(), homeIt));
+        std::string display = "~";
+        for (int i = homeIdx - 1; i >= 0; --i) {
+            display += "/" + fs->getDirectoryInfo(chain[i]).name;
+        }
+        return display;
+    }
+
+    // Otherwise, build absolute display path from root
+    std::string display = "";
+    for (int i = static_cast<int>(chain.size()) - 2; i >= 0; --i) {
+        display += "/" + fs->getDirectoryInfo(chain[i]).name;
+    }
+
+    return display.empty() ? "/" : display;
+}
+
+// ============================================================
+// FILE I/O HELPERS
+// ============================================================
+
+bool CommandPrompt::readFileContent(const std::string& fileId, const std::string& ownerPID, std::string& outContent) {
+    fs->closeFile(fileId, ownerPID);
+    fs->closeFile(fileId, "USER");
+    fs->closeFile(fileId, "SYSTEM");
+
+    bool opened = fs->openFile(fileId, ownerPID, 0);
+    if (!opened) {
+        opened = fs->openFile(fileId, "USER", 0) || fs->openFile(fileId, "SYSTEM", 0);
+    }
+
+    bool ok = false;
+    outContent = fs->readFile(fileId, ownerPID, 0, ok);
+    if (!ok) {
+        outContent = fs->readFile(fileId, "USER", 0, ok);
+    }
+    if (!ok) {
+        outContent = fs->readFile(fileId, "SYSTEM", 0, ok);
+    }
+    fs->closeFile(fileId, ownerPID);
+    fs->closeFile(fileId, "USER");
+    fs->closeFile(fileId, "SYSTEM");
+    return ok;
+}
+
+bool CommandPrompt::writeFileContent(const std::string& fileId, const std::string& ownerPID, const std::string& content) {
+    fs->closeFile(fileId, ownerPID);
+    fs->closeFile(fileId, "USER");
+    fs->closeFile(fileId, "SYSTEM");
+
+    bool opened = fs->openFile(fileId, ownerPID, 0);
+    if (!opened) {
+        opened = fs->openFile(fileId, "USER", 0) || fs->openFile(fileId, "SYSTEM", 0);
+    }
+
+    bool ok = fs->writeFile(fileId, ownerPID, content, 0);
+    if (!ok) ok = fs->writeFile(fileId, "USER", content, 0) || fs->writeFile(fileId, "SYSTEM", content, 0);
+
+    fs->closeFile(fileId, ownerPID);
+    fs->closeFile(fileId, "USER");
+    fs->closeFile(fileId, "SYSTEM");
+    return ok;
+}
+
+bool CommandPrompt::appendFileContent(const std::string& fileId, const std::string& ownerPID, const std::string& content)
+{
+    fs->closeFile(fileId, ownerPID);
+    fs->closeFile(fileId, "USER");
+    fs->closeFile(fileId, "SYSTEM");
+
+    bool opened = fs->openFile(fileId, ownerPID, 0);
+    if (!opened) {
+        opened = fs->openFile(fileId, "USER", 0) || fs->openFile(fileId, "SYSTEM", 0);
+    }
+
+    bool ok = fs->appendFile(fileId, ownerPID, content, 0);
+    if (!ok) ok = fs->appendFile(fileId, "USER", content, 0) || fs->appendFile(fileId, "SYSTEM", content, 0);
+
+    fs->closeFile(fileId, ownerPID);
+    fs->closeFile(fileId, "USER");
+    fs->closeFile(fileId, "SYSTEM");
+    return ok;
+}
+
+bool CommandPrompt::writeToFileOrPath(const std::string& target, const std::string& content, bool isAppend)
+{
+    std::string parentDirId, name;
+    if (!resolvePathToParentAndName(target, parentDirId, name)) {
+        return false;
+    }
+
+    // Fail if a directory already shares this name
+    if (!fs->findChildDirectoryIdByName(parentDirId, name).empty()) {
+        return false;
+    }
+
+    FileInfo fi = fs->findChildFileByName(parentDirId, name);
+    std::string fileId = fi.fileId;
+    std::string ownerPID = fi.ownerPID.empty() ? "USER" : fi.ownerPID;
+
+    if (fileId.empty()) {
+        fileId = fs->createFile("USER", name, 1, 0, parentDirId);
+        ownerPID = "USER";
+    }
+
+    if (fileId.empty()) return false;
+
+    if (isAppend) {
+        return appendFileContent(fileId, ownerPID, content);
+    } else {
+        return writeFileContent(fileId, ownerPID, content);
+    }
+}
+
+// ============================================================
+// ESCAPES & PARSING UTILITIES
+// ============================================================
+
+std::string CommandPrompt::stripQuotes(const std::string& str)
+{
     if (str.length() >= 2) {
         if ((str.front() == '"' && str.back() == '"') || (str.front() == '\'' && str.back() == '\'')) {
             return str.substr(1, str.length() - 2);
@@ -114,7 +331,8 @@ std::string CommandPrompt::stripQuotes(const std::string& str) {
     return str;
 }
 
-std::string CommandPrompt::processEscapes(const std::string& str) {
+std::string CommandPrompt::processEscapes(const std::string& str)
+{
     std::string result;
     result.reserve(str.size());
     for (size_t i = 0; i < str.size(); ++i) {
@@ -137,7 +355,8 @@ std::string CommandPrompt::processEscapes(const std::string& str) {
     return result;
 }
 
-bool CommandPrompt::parseRedirection(const std::string& input, std::string& baseCmd, std::string& targetFile, bool& isAppend) {
+bool CommandPrompt::parseRedirection(const std::string& input, std::string& baseCmd, std::string& targetFile, bool& isAppend)
+{
     bool inDoubleQuotes = false;
     bool inSingleQuotes = false;
     bool escaped = false;
@@ -172,14 +391,10 @@ bool CommandPrompt::parseRedirection(const std::string& input, std::string& base
     baseCmd = input.substr(0, redirectPos);
     size_t fileStart = redirectPos + (isAppend ? 2 : 1);
     std::string rawFile = input.substr(fileStart);
-    
+
     size_t s = rawFile.find_first_not_of(" \t\r\n");
     size_t e = rawFile.find_last_not_of(" \t\r\n");
-    if (s != std::string::npos && e != std::string::npos) {
-        targetFile = rawFile.substr(s, e - s + 1);
-    } else {
-        targetFile = "";
-    }
+    targetFile = (s != std::string::npos && e != std::string::npos) ? rawFile.substr(s, e - s + 1) : "";
     targetFile = stripQuotes(targetFile);
 
     size_t be = baseCmd.find_last_not_of(" \t\r\n");
@@ -190,135 +405,8 @@ bool CommandPrompt::parseRedirection(const std::string& input, std::string& base
     return true;
 }
 
-bool CommandPrompt::writeToFileOrPath(const std::string& target, const std::string& content, bool isAppend) {
-    std::string filename = stripQuotes(target);
-    std::string targetDir = currentPathString;
-    
-    size_t lastSlash = filename.find_last_of('/');
-    if (lastSlash != std::string::npos) {
-        std::string dirPart = filename.substr(0, lastSlash);
-        filename = filename.substr(lastSlash + 1);
-        if (dirPart == "~") targetDir = "~";
-        else if (dirPart.find("~") == 0) targetDir = dirPart;
-        else if (targetDir == "~") targetDir = "~/" + dirPart;
-        else targetDir = targetDir + "/" + dirPart;
-    }
-
-    std::string fileId = "";
-    std::string ownerPID = "USER";
-    auto entries = getFileEntriesInPath(targetDir);
-    for (const auto& e : entries) {
-        if (e.name == filename) {
-            fileId = e.fileId;
-            ownerPID = e.ownerPID;
-            break;
-        }
-    }
-
-    if (fileId.empty()) {
-        fileId = fs->createFile("USER", filename, 1, 0, targetDir);
-        ownerPID = "USER";
-    }
-
-    if (fileId.empty()) return false;
-
-    if (isAppend) {
-        return appendFileContent(fileId, ownerPID, content);
-    } else {
-        return writeFileContent(fileId, ownerPID, content);
-    }
-}
-
-bool CommandPrompt::readFileContent(const std::string& fileId, const std::string& ownerPID, std::string& outContent) {
-    fs->closeFile(fileId, ownerPID);
-    fs->closeFile(fileId, "USER");
-    fs->closeFile(fileId, "SYSTEM");
-
-    bool opened = fs->openFile(fileId, ownerPID, 0);
-    if (!opened) {
-        opened = fs->openFile(fileId, "USER", 0) || fs->openFile(fileId, "SYSTEM", 0);
-    }
-    bool ok = false;
-    outContent = fs->readFile(fileId, ownerPID, 0, ok);
-    if (!ok) {
-        outContent = fs->readFile(fileId, "USER", 0, ok);
-    }
-    if (!ok) {
-        outContent = fs->readFile(fileId, "SYSTEM", 0, ok);
-    }
-    fs->closeFile(fileId, ownerPID);
-    fs->closeFile(fileId, "USER");
-    fs->closeFile(fileId, "SYSTEM");
-    return ok;
-}
-
-bool CommandPrompt::writeFileContent(const std::string& fileId, const std::string& ownerPID, const std::string& content) {
-    fs->closeFile(fileId, ownerPID);
-    fs->closeFile(fileId, "USER");
-    fs->closeFile(fileId, "SYSTEM");
-
-    bool opened = fs->openFile(fileId, ownerPID, 0);
-    if (!opened) {
-        opened = fs->openFile(fileId, "USER", 0) || fs->openFile(fileId, "SYSTEM", 0);
-    }
-    bool ok = fs->writeFile(fileId, ownerPID, content, 0);
-    if (!ok) {
-        ok = fs->writeFile(fileId, "USER", content, 0) || fs->writeFile(fileId, "SYSTEM", content, 0);
-    }
-    fs->closeFile(fileId, ownerPID);
-    fs->closeFile(fileId, "USER");
-    fs->closeFile(fileId, "SYSTEM");
-    return ok;
-}
-
-bool CommandPrompt::appendFileContent(const std::string& fileId, const std::string& ownerPID, const std::string& content) {
-    fs->closeFile(fileId, ownerPID);
-    fs->closeFile(fileId, "USER");
-    fs->closeFile(fileId, "SYSTEM");
-
-    bool opened = fs->openFile(fileId, ownerPID, 0);
-    if (!opened) {
-        opened = fs->openFile(fileId, "USER", 0) || fs->openFile(fileId, "SYSTEM", 0);
-    }
-    bool ok = fs->appendFile(fileId, ownerPID, content, 0);
-    if (!ok) {
-        ok = fs->appendFile(fileId, "USER", content, 0) || fs->appendFile(fileId, "SYSTEM", content, 0);
-    }
-    fs->closeFile(fileId, ownerPID);
-    fs->closeFile(fileId, "USER");
-    fs->closeFile(fileId, "SYSTEM");
-    return ok;
-}
-
-std::string CommandPrompt::getPrompt() const {
-    std::string green = "\033[1;32m";
-    std::string blue = "\033[1;34m";
-    std::string reset = "\033[0m";
-    return green + username + "@" + hostname + reset + ":" 
-         + blue + currentPathString + reset + "$ ";
-}
-
-void CommandPrompt::printPrompt() {
-    std::cout << getPrompt();
-}
-
-std::string CommandPrompt::getCurrentPath() const {
-    return currentPathString;
-}
-
-std::string CommandPrompt::getUsername() const {
-    return username;
-}
-
-std::string CommandPrompt::getHostname() const {
-    return hostname;
-}
-
-const std::vector<std::string>& CommandPrompt::getCommandHistory() const {
-    return commandHistory;
-}
-
-std::vector<std::string> CommandPrompt::splitCommand(const std::string& cmd) {
+std::vector<std::string> CommandPrompt::splitCommand(const std::string& cmd)
+{
     std::vector<std::string> tokens;
     std::string current;
     bool inDoubleQuotes = false;
@@ -348,155 +436,124 @@ std::vector<std::string> CommandPrompt::splitCommand(const std::string& cmd) {
     return tokens;
 }
 
-std::string CommandPrompt::executeWhoami() { 
-    return username + "\n"; 
+// ============================================================
+// COMMAND HANDLERS
+// ============================================================
+
+std::string CommandPrompt::executeWhoami() {
+    return username + "\n";
 }
 
 std::string CommandPrompt::executePwd() {
-    std::string absolutePath = currentPathString;
-    if (absolutePath.find("~") == 0) {
-        absolutePath.replace(0, 1, "/home/" + username);
+    if (currentDirId == fs->getRootDirId()) {
+        return "/\n";
     }
-    return absolutePath + "\n";
+
+    std::vector<std::string> names;
+    std::string curr = currentDirId;
+    while (!curr.empty() && curr != fs->getRootDirId()) {
+        DirectoryInfo info = fs->getDirectoryInfo(curr);
+        if (info.dirId.empty()) break;
+        names.push_back(info.name);
+        curr = info.parentDirId;
+    }
+
+    std::string full;
+    for (int i = static_cast<int>(names.size()) - 1; i >= 0; --i) {
+        full += "/" + names[i];
+    }
+    return (full.empty() ? "/" : full) + "\n";
 }
 
-std::string CommandPrompt::executeClear() { 
-    return "\033[2J\033[1;1H"; 
+std::string CommandPrompt::executeClear() {
+    return "\033[2J\033[1;1H";
 }
 
 std::string CommandPrompt::executeLs(const std::vector<std::string>& args) {
-    (void)args;
+    std::string targetDirId = currentDirId;
+
+    for (size_t i = 1; i < args.size(); ++i) {
+        if (args[i].rfind("-", 0) != 0) {
+            std::string pathArg = stripQuotes(args[i]);
+            std::string resolved = resolveDirPath(pathArg);
+            if (resolved.empty()) {
+                std::string parentId, name;
+                if (resolvePathToParentAndName(pathArg, parentId, name)) {
+                    FileInfo fi = fs->findChildFileByName(parentId, name);
+                    if (!fi.fileId.empty()) {
+                        return pathArg + "\n";
+                    }
+                }
+                return "ls: cannot access '" + pathArg + "': No such file or directory\n";
+            }
+            targetDirId = resolved;
+            break;
+        }
+    }
+
+    std::ostringstream out;
     std::string blue = "\033[1;34m";
     std::string reset = "\033[0m";
     std::string red = "\033[1;31m";
 
-    std::ostringstream out;
-    auto dirs = getSubdirectories(currentPathString);
+    auto dirs = fs->getChildDirectories(targetDirId);
+    std::sort(dirs.begin(), dirs.end(), [](const DirectoryInfo& a, const DirectoryInfo& b) {
+        return a.name < b.name;
+    });
+
     for (const auto& dir : dirs) {
-        out << blue << dir << reset << "  ";
+        out << blue << dir.name << reset << "  ";
     }
 
-    auto files = getFilesInPath(currentPathString);
+    auto files = fs->getChildFiles(targetDirId);
+    std::sort(files.begin(), files.end(), [](const FileInfo& a, const FileInfo& b) {
+        return a.name < b.name;
+    });
+
     for (const auto& f : files) {
-        std::string file = f.first;
-        if (file.find(".deb") != std::string::npos) {
-            out << red << file << reset << "  ";
-        } else if (file.find(" ") != std::string::npos) {
-            out << "'" << file << "'  ";
+        if (f.name.find(".deb") != std::string::npos) {
+            out << red << f.name << reset << "  ";
+        } else if (f.name.find(" ") != std::string::npos) {
+            out << "'" << f.name << "'  ";
         } else {
-            out << file << "  ";
+            out << f.name << "  ";
         }
     }
-    out << "\n";
+
+    if (!dirs.empty() || !files.empty()) {
+        out << "\n";
+    }
     return out.str();
-}
-
-bool CommandPrompt::changeDirectoryRecursive(const std::vector<std::string>& pathParts, size_t index, const std::string& target, std::string& errorMsg) {
-    // Base case: all path segments processed successfully
-    if (index >= pathParts.size()) {
-        return true;
-    }
-
-    std::string p = pathParts[index];
-    std::string savedPath = currentPathString;
-
-    if (p == ".") {
-        // Stay in current directory, advance to next segment
-        if (changeDirectoryRecursive(pathParts, index + 1, target, errorMsg)) {
-            return true;
-        }
-        currentPathString = savedPath;
-        return false;
-    } else if (p == "..") {
-        if (currentPathString != "~") {
-            size_t lastSlash = currentPathString.find_last_of('/');
-            if (lastSlash != std::string::npos && lastSlash != 0) {
-                currentPathString = currentPathString.substr(0, lastSlash);
-            } else {
-                currentPathString = "~";
-            }
-        }
-        if (changeDirectoryRecursive(pathParts, index + 1, target, errorMsg)) {
-            return true;
-        }
-        // Backtrack
-        currentPathString = savedPath;
-        return false;
-    } else {
-        auto dirs = getSubdirectories(currentPathString);
-        if (std::find(dirs.begin(), dirs.end(), p) != dirs.end()) {
-            if (currentPathString == "~") {
-                currentPathString = "~/" + p;
-            } else {
-                currentPathString = currentPathString + "/" + p;
-            }
-
-            // Recurse to next segment
-            if (changeDirectoryRecursive(pathParts, index + 1, target, errorMsg)) {
-                return true;
-            }
-
-            // Backtrack if any deeper directory was not found
-            currentPathString = savedPath;
-            return false;
-        } else {
-            // Check if it exists as a regular file
-            auto files = getFilesInPath(currentPathString);
-            bool isFile = false;
-            for (const auto& f : files) {
-                if (f.first == p) {
-                    isFile = true;
-                    break;
-                }
-            }
-
-            if (isFile) {
-                errorMsg = "bash: cd: " + target + ": Not a directory\n";
-            } else {
-                errorMsg = "bash: cd: " + target + ": No such file or directory\n";
-            }
-
-            return false;
-        }
-    }
 }
 
 std::string CommandPrompt::executeCd(const std::vector<std::string>& args) {
     if (args.size() < 2 || args[1] == "~") {
-        currentPathString = "~";
+        currentDirId = homeDirId;
         return "";
     }
 
-    std::string target = args[1];
-    std::vector<std::string> pathParts;
-    std::stringstream ss(target);
-    std::string part;
-    while (std::getline(ss, part, '/')) {
-        if (!part.empty()) {
-            pathParts.push_back(part);
+    std::string target = stripQuotes(args[1]);
+    if (target.empty()) {
+        currentDirId = homeDirId;
+        return "";
+    }
+
+    std::string resolved = resolveDirPath(target);
+    if (!resolved.empty()) {
+        currentDirId = resolved;
+        return "";
+    }
+
+    // Check if path resolved to a regular file instead of a directory
+    std::string parentId, name;
+    if (resolvePathToParentAndName(target, parentId, name)) {
+        FileInfo fi = fs->findChildFileByName(parentId, name);
+        if (!fi.fileId.empty()) {
+            return "bash: cd: " + target + ": Not a directory\n";
         }
     }
 
-    std::string originalPath = currentPathString;
-
-    if (target[0] == '/') {
-        currentPathString = "~"; // Treat root as ~ in this mock
-    } else if (target[0] == '~') {
-        currentPathString = "~";
-        if (!pathParts.empty() && pathParts[0] == "~") {
-            pathParts.erase(pathParts.begin());
-        }
-    }
-
-    std::string errorMsg = "";
-    bool success = changeDirectoryRecursive(pathParts, 0, target, errorMsg);
-    if (!success) {
-        // Backtrack to the directory from where the user called it
-        currentPathString = originalPath;
-        return errorMsg;
-    }
-
-    return "";
+    return "bash: cd: " + target + ": No such file or directory\n";
 }
 
 std::string CommandPrompt::executeEcho(const std::string& fullCmd) {
@@ -573,6 +630,43 @@ std::string CommandPrompt::executePrintf(const std::string& fullCmd) {
     return processed;
 }
 
+std::string CommandPrompt::executeCat(const std::vector<std::string>& args)
+{
+    if (args.size() < 2) return "";
+    std::ostringstream out;
+
+    for (size_t i = 1; i < args.size(); ++i) {
+        std::string target = stripQuotes(args[i]);
+        if (target.empty()) continue;
+
+        std::string parentDirId, name;
+        if (!resolvePathToParentAndName(target, parentDirId, name)) {
+            out << "cat: '" << target << "': No such file or directory\n";
+            continue;
+        }
+
+        if (!fs->findChildDirectoryIdByName(parentDirId, name).empty()) {
+            out << "cat: " << target << ": Is a directory\n";
+            continue;
+        }
+
+        FileInfo fi = fs->findChildFileByName(parentDirId, name);
+        if (fi.fileId.empty()) {
+            out << "cat: '" << target << "': No such file or directory\n";
+            continue;
+        }
+
+        std::string content;
+        bool ok = readFileContent(fi.fileId, fi.ownerPID, content);
+        if (ok) {
+            out << content;
+        } else {
+            out << "[File System Emulator] Binary file or content not readable by OS.\n";
+        }
+    }
+    return out.str();
+}
+
 std::string CommandPrompt::executeRead(const std::vector<std::string>& args) {
     if (args.size() < 2) return "read: missing file operand\n";
     return executeCat(args);
@@ -629,133 +723,142 @@ std::string CommandPrompt::executeAppend(const std::string& fullCmd) {
 }
 
 std::string CommandPrompt::executeMkdir(const std::vector<std::string>& args) {
-    if (args.size() < 2) { 
-        return "mkdir: missing operand\n"; 
-    }
-    std::string dirName = stripQuotes(args[1]);
-    std::string newDirPath = (currentPathString == "~") ? currentPathString + "/" + dirName : currentPathString + "/" + dirName;
-    fs->createFile("USER", ".dir_marker", 1, 0, newDirPath);
-    return "";
-}
-
-std::string CommandPrompt::executeRm(const std::vector<std::string>& args) {
-    if (args.size() < 2) { 
-        return "rm: missing operand\n"; 
-    }
-    std::string target = stripQuotes(args[1]);
-    bool isRecursive = (target == "-r" || target == "-rf");
-    if (isRecursive) {
-        if (args.size() < 3) { 
-            return "rm: missing operand\n"; 
-        }
-        target = stripQuotes(args[2]);
+    if (args.size() < 2) {
+        return "mkdir: missing operand\n";
     }
 
-    auto entries = getFileEntriesInPath(currentPathString);
-    for (const auto& e : entries) {
-        if (e.name == target) {
-            fs->deleteFile(e.fileId);
-            return "";
-        }
-    }
-
-    auto dirs = getSubdirectories(currentPathString);
-    if (std::find(dirs.begin(), dirs.end(), target) != dirs.end()) {
-        if (!isRecursive) {
-            return "rm: cannot remove '" + target + "': Is a directory\n";
-        } else {
-            std::string targetDirPath = (currentPathString == "~") ? currentPathString + "/" + target : currentPathString + "/" + target;
-            std::string json = fs->getSnapshotAsJson();
-            size_t pos = 0;
-            std::vector<std::string> toDelete;
-            while (true) {
-                pos = json.find("{\"fileId\":", pos);
-                if (pos == std::string::npos) break;
-                std::string fileId = extractJsonValue(json, "fileId", pos);
-                std::string dirPath = extractJsonValue(json, "dirPath", pos);
-                if (dirPath.find(targetDirPath) == 0) toDelete.push_back(fileId);
-                pos += 10;
-            }
-            for (const auto& id : toDelete) fs->deleteFile(id);
-            return "";
-        }
-    }
-
-    return "rm: cannot remove '" + target + "': No such file or directory\n";
-}
-
-std::string CommandPrompt::executeTouch(const std::vector<std::string>& args) {
-    if (args.size() < 2) { 
-        return "touch: missing file operand\n"; 
-    }
-    auto entries = getFileEntriesInPath(currentPathString);
+    std::string errorMsg = "";
     for (size_t i = 1; i < args.size(); ++i) {
-        std::string filename = stripQuotes(args[i]);
-        bool exists = false;
-        for (const auto& e : entries) {
-            if (e.name == filename) {
-                exists = true;
-                if (fs->openFile(e.fileId, e.ownerPID, 0)) {
-                    fs->closeFile(e.fileId, e.ownerPID);
-                }
-                break;
+        if (args[i].rfind("-", 0) == 0) continue;
+        std::string target = stripQuotes(args[i]);
+        if (target.empty()) continue;
+
+        std::string parentDirId, name;
+        if (!resolvePathToParentAndName(target, parentDirId, name)) {
+            errorMsg += "mkdir: cannot create directory '" + target + "': No such file or directory\n";
+            continue;
+        }
+
+        std::string newId = fs->createDirectory(name, parentDirId, 0);
+        if (newId.empty()) {
+            if (!fs->findChildDirectoryIdByName(parentDirId, name).empty() ||
+                !fs->findChildFileByName(parentDirId, name).fileId.empty()) {
+                errorMsg += "mkdir: cannot create directory '" + target + "': File exists\n";
+            } else {
+                errorMsg += "mkdir: cannot create directory '" + target + "': Failed to create\n";
             }
         }
-        if (!exists) {
-            std::string fileId = fs->createFile("USER", filename, 1, 0, currentPathString);
+    }
+    return errorMsg;
+}
+
+std::string CommandPrompt::executeRm(const std::vector<std::string>& args)
+{
+    if (args.size() < 2) {
+        return "rm: missing operand\n";
+    }
+
+    bool isRecursive = false;
+    std::vector<std::string> targets;
+
+    for (size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "-r" || args[i] == "-rf" || args[i] == "-fr" || args[i] == "-R") {
+            isRecursive = true;
+        } else {
+            targets.push_back(stripQuotes(args[i]));
+        }
+    }
+
+    if (targets.empty()) {
+        return "rm: missing operand\n";
+    }
+
+    std::string errorMsg = "";
+
+    // Recursive directory cleanup lambda
+    auto deleteDirRecursive = [this](auto& self, const std::string& dId) -> void {
+        auto childFiles = fs->getChildFiles(dId);
+        for (const auto& cf : childFiles) {
+            fs->deleteFile(cf.fileId);
+        }
+        auto childDirs = fs->getChildDirectories(dId);
+        for (const auto& cd : childDirs) {
+            self(self, cd.dirId);
+        }
+        fs->deleteDirectory(dId);
+    };
+
+    for (const auto& target : targets) {
+        std::string parentDirId, name;
+        if (!resolvePathToParentAndName(target, parentDirId, name)) {
+            errorMsg += "rm: cannot remove '" + target + "': No such file or directory\n";
+            continue;
+        }
+
+        // 1. Check if target is a file
+        FileInfo fi = fs->findChildFileByName(parentDirId, name);
+        if (!fi.fileId.empty()) {
+            fs->deleteFile(fi.fileId);
+            continue;
+        }
+
+        // 2. Check if target is a directory
+        std::string dId = fs->findChildDirectoryIdByName(parentDirId, name);
+        if (!dId.empty()) {
+            if (dId == fs->getRootDirId()) {
+                errorMsg += "rm: cannot remove root directory '/'\n";
+                continue;
+            }
+            if (dId == currentDirId) {
+                errorMsg += "rm: cannot remove current working directory\n";
+                continue;
+            }
+            if (!isRecursive) {
+                errorMsg += "rm: cannot remove '" + target + "': Is a directory\n";
+                continue;
+            }
+            deleteDirRecursive(deleteDirRecursive, dId);
+            continue;
+        }
+
+        errorMsg += "rm: cannot remove '" + target + "': No such file or directory\n";
+    }
+
+    return errorMsg;
+}
+
+std::string CommandPrompt::executeTouch(const std::vector<std::string>& args)
+{
+    if (args.size() < 2) {
+        return "touch: missing file operand\n";
+    }
+
+    for (size_t i = 1; i < args.size(); ++i) {
+        if (args[i].rfind("-", 0) == 0) continue;
+        std::string target = stripQuotes(args[i]);
+        if (target.empty()) continue;
+
+        std::string parentDirId, name;
+        if (!resolvePathToParentAndName(target, parentDirId, name)) {
+            return "touch: cannot touch '" + target + "': No such file or directory\n";
+        }
+
+        FileInfo fi = fs->findChildFileByName(parentDirId, name);
+        if (!fi.fileId.empty()) {
+            if (fs->openFile(fi.fileId, fi.ownerPID, 0)) {
+                fs->closeFile(fi.fileId, fi.ownerPID);
+            }
+        } else {
+            if (!fs->findChildDirectoryIdByName(parentDirId, name).empty()) {
+                continue; // Directory already exists with this name
+            }
+            std::string fileId = fs->createFile("USER", name, 1, 0, parentDirId);
             if (!fileId.empty()) {
                 writeFileContent(fileId, "USER", "");
             }
         }
     }
     return "";
-}
-
-std::string CommandPrompt::executeCat(const std::vector<std::string>& args) {
-    if (args.size() < 2) return "";
-    std::ostringstream out;
-    
-    for (size_t i = 1; i < args.size(); ++i) {
-        std::string target = stripQuotes(args[i]);
-        std::string targetDir = currentPathString;
-        std::string filename = target;
-        
-        size_t lastSlash = target.find_last_of('/');
-        if (lastSlash != std::string::npos) {
-            std::string dirPart = target.substr(0, lastSlash);
-            filename = target.substr(lastSlash + 1);
-            if (dirPart == "~") targetDir = "~";
-            else if (dirPart.find("~") == 0) targetDir = dirPart;
-            else if (targetDir == "~") targetDir = "~/" + dirPart;
-            else targetDir = targetDir + "/" + dirPart;
-        }
-
-        auto entries = getFileEntriesInPath(targetDir);
-        bool found = false;
-        for (const auto& e : entries) {
-            if (e.name == filename) {
-                found = true;
-                std::string content;
-                bool ok = readFileContent(e.fileId, e.ownerPID, content);
-                if (ok) {
-                    out << content;
-                } else {
-                    out << "[File System Emulator] Binary file or content not readable by OS.\n";
-                }
-                break;
-            }
-        }
-        
-        if (!found) {
-            auto dirs = getSubdirectories(targetDir);
-            if (std::find(dirs.begin(), dirs.end(), filename) != dirs.end()) {
-                out << "cat: " << target << ": Is a directory\n";
-            } else {
-                out << "cat: '" << target << "': No such file or directory\n";
-            }
-        }
-    }
-    return out.str();
 }
 
 std::string CommandPrompt::executeHistory() {
@@ -767,7 +870,7 @@ std::string CommandPrompt::executeHistory() {
 }
 
 std::string CommandPrompt::executeDate() {
-    time_t now = time(0);
+    time_t now = time(nullptr);
     char* dt = ctime(&now);
     return dt ? std::string(dt) : "\n";
 }
@@ -806,14 +909,18 @@ std::string CommandPrompt::executeHelp() {
     return out.str();
 }
 
+// ============================================================
+// TOP-LEVEL EXECUTION & TERMINAL INTERFACE
+// ============================================================
+
 std::string CommandPrompt::executeCommand(const std::string& input) {
     if (input.empty()) return "";
     commandHistory.push_back(input);
-    if (input.find(";") != std::string::npos) { 
-        return "bash: syntax error near unexpected token `;'\n"; 
+
+    if (input.find(";") != std::string::npos) {
+        return "bash: syntax error near unexpected token `;'\n";
     }
 
-    // Check for general redirection > or >> outside quotes
     std::string baseCmd, targetFile;
     bool isAppend = false;
     if (parseRedirection(input, baseCmd, targetFile, isAppend)) {
@@ -827,7 +934,7 @@ std::string CommandPrompt::executeCommand(const std::string& input) {
         }
         return "";
     }
-    
+
     std::vector<std::string> args = splitCommand(input);
     if (args.empty()) return "";
     std::string cmd = args[0];
@@ -854,13 +961,52 @@ std::string CommandPrompt::executeCommand(const std::string& input) {
     else return cmd + ": command not found\n";
 }
 
+std::string CommandPrompt::getPrompt() const
+{
+    std::string green = "\033[1;32m";
+    std::string blue = "\033[1;34m";
+    std::string reset = "\033[0m";
+    return green + username + "@" + hostname + reset + ":"
+         + blue + getCurrentPath() + reset + "$ ";
+}
+
+void CommandPrompt::printPrompt()
+{
+    std::cout << getPrompt();
+}
+
+std::string CommandPrompt::getCurrentPath() const
+{
+    return buildDisplayPath(currentDirId);
+}
+
+std::string CommandPrompt::getCurrentDirId() const
+{
+    return currentDirId;
+}
+
+std::string CommandPrompt::getUsername() const
+{
+    return username;
+}
+
+std::string CommandPrompt::getHostname() const
+{
+    return hostname;
+}
+
+const std::vector<std::string>& CommandPrompt::getCommandHistory() const
+{
+    return commandHistory;
+}
+
 void CommandPrompt::run() {
     std::string input;
     while (true) {
         printPrompt();
         if (!std::getline(std::cin, input)) break;
         if (input.empty()) continue;
-        
+
         std::vector<std::string> args = splitCommand(input);
         if (!args.empty() && args[0] == "exit") {
             commandHistory.push_back(input);
