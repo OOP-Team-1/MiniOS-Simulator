@@ -23,6 +23,7 @@
 
 #include "../include/SimulationEngine.h"
 #include "../include/MemoryManager.h"
+#include "../include/PagingManager.h"
 #include "../include/FileSystem.h"
 
 #include "../include/FirstFit.h"
@@ -166,9 +167,10 @@ int main()
     // ------------------------------------------------------
 
     MemoryManager memoryManager(100, firstFit);
+    PagingManager pagingManager(256, 4, ReplacementPolicy::LRU);
     FileSystem fileSystem(32, 512, fileStrategy, "data/disk.img");
 
-    SimulationEngine engine(memoryManager, fileSystem, roundRobin);
+    SimulationEngine engine(memoryManager, pagingManager, fileSystem, roundRobin);
     engine.setCurrentSchedulerName("RR", 2);
     engine.setCurrentAllocName("FirstFit");
 
@@ -208,7 +210,7 @@ int main()
             }
             else if (cmd == "COMPACT")
             {
-                memoryManager.compact();
+                engine.compactMemory();
             }
             else if (cmd == "DISK_COMPACT")
             {
@@ -282,6 +284,24 @@ int main()
                     memoryManager.setStrategy(worstFit);
                     engine.setCurrentAllocName("WorstFit");
                 }
+            }
+            else if (cmd == "SET_PAGE_POLICY" && tok.size() >= 2)
+            {
+                // SET_PAGE_POLICY <LRU|FIFO>
+                const std::string& pol = tok[1];
+                if (pol == "FIFO")
+                {
+                    pagingManager.setPolicy(ReplacementPolicy::FIFO);
+                }
+                else if (pol == "LRU")
+                {
+                    pagingManager.setPolicy(ReplacementPolicy::LRU);
+                }
+            }
+            else if (cmd == "ACCESS_MEM" && tok.size() >= 3)
+            {
+                // ACCESS_MEM <pid> <logicalAddress>
+                engine.accessMemory(tok[1], std::stoi(tok[2]));
             }
             // ── Directory commands ──────────────────────────────────────
             else if (cmd == "DIR_CREATE" && tok.size() >= 2)

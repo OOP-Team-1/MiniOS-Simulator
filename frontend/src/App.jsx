@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowUp, Battery, Check, ChevronDown, Clock3, Cpu, FileText,
   Folder, FolderPlus, FolderOpen, HardDrive, LayoutGrid, FilePlus, Maximize2,
-  Minimize2, Monitor, Moon, Plus, Power, Play, Search, Settings, ShieldCheck,
+  Minimize2, Monitor, Moon, Pause, Plus, Power, Play, RotateCcw, Search, Settings, ShieldCheck,
   SlidersHorizontal, Terminal, Trash2, Wifi, X, Zap,
 } from 'lucide-react';
 import { io } from 'socket.io-client';
@@ -57,6 +57,23 @@ const APP_TONES = {
   'system-monitor': 'text-rose-300 bg-rose-400/10 border-rose-300/20',
   settings: 'text-zinc-300 bg-zinc-400/10 border-zinc-300/20',
 };
+
+const PROC_PALETTE = [
+  { bg: 'bg-sky-400/[0.18]', border: 'border-sky-400/40', text: 'text-sky-200', dot: 'bg-sky-400' },
+  { bg: 'bg-emerald-400/[0.18]', border: 'border-emerald-400/40', text: 'text-emerald-200', dot: 'bg-emerald-400' },
+  { bg: 'bg-violet-400/[0.18]', border: 'border-violet-400/40', text: 'text-violet-200', dot: 'bg-violet-400' },
+  { bg: 'bg-amber-400/[0.18]', border: 'border-amber-400/40', text: 'text-amber-200', dot: 'bg-amber-400' },
+  { bg: 'bg-rose-400/[0.18]', border: 'border-rose-400/40', text: 'text-rose-200', dot: 'bg-rose-400' },
+  { bg: 'bg-teal-400/[0.18]', border: 'border-teal-400/40', text: 'text-teal-200', dot: 'bg-teal-400' },
+  { bg: 'bg-fuchsia-400/[0.18]', border: 'border-fuchsia-400/40', text: 'text-fuchsia-200', dot: 'bg-fuchsia-400' },
+];
+
+function getProcColor(pid) {
+  if (!pid) return { bg: 'border-white/[0.04] bg-white/[0.02]', border: 'border-white/[0.04]', text: 'text-slate-600', dot: 'bg-slate-700' };
+  let hash = 0;
+  for (let i = 0; i < pid.length; i++) hash = (hash << 5) - hash + pid.charCodeAt(i);
+  return PROC_PALETTE[Math.abs(hash) % PROC_PALETTE.length];
+}
 
 // ============================================================================
 // LOCAL GANTT MATH (Hybrid fallback for perfect UI visuals)
@@ -200,6 +217,8 @@ export default function App() {
   const [newProcPriority, setNewProcPriority] = useState('1');
   const [newProcMemory, setNewProcMemory] = useState('10');
   const [newProcArrival, setNewProcArrival] = useState('0');
+  const [currentTick, setCurrentTick] = useState(0);
+  const [isClockRunning, setIsClockRunning] = useState(false);
 
   const [schedAlgo, setSchedAlgo] = useState('RR');
   const [timeQuantum, setTimeQuantum] = useState(3);
@@ -212,6 +231,11 @@ export default function App() {
   const [fsFiles, setFsFiles] = useState([]);
   const [currentDirId, setCurrentDirId] = useState('D0');
   const [memoryStats, setMemoryStats] = useState(null);
+  const [pagingStats, setPagingStats] = useState(null);
+  const [memoryTab, setMemoryTab] = useState('paging');
+  const [selectedPagingPID, setSelectedPagingPID] = useState('ALL');
+  const [testLogicalAddr, setTestLogicalAddr] = useState('0');
+  const [activeAllocStrategy, setActiveAllocStrategy] = useState('FirstFit');
   const [diskStats, setDiskStats] = useState(null);
   const [newItemType, setNewItemType] = useState(null);
   const [newItemName, setNewItemName] = useState('');
@@ -255,6 +279,9 @@ export default function App() {
         setProcesses(translatedProcesses);
 
         // Auto-clear hidden PIDs when simulation resets to tick 0 with no processes
+        if (typeof data.tick === 'number') {
+          setCurrentTick(data.tick);
+        }
         if (data.tick === 0 && translatedProcesses.length === 0) {
           setHiddenPIDs(new Set());
         }
@@ -265,6 +292,7 @@ export default function App() {
         const allDone = visibleProcs.length > 0 && visibleProcs.every(p => p.state === 'TERMINATED');
         if (allDone) {
             socket.emit('timer:pause');
+            setIsClockRunning(false);
         }
 
         // If C++ natively sends a timeline or metrics, use them, otherwise rely on our Hybrid math
@@ -276,8 +304,14 @@ export default function App() {
             });
         }
       }
+      if (data.config && data.config.allocStrategy) {
+        setActiveAllocStrategy(data.config.allocStrategy);
+      }
       if (data.memory) {
         setMemoryStats(data.memory);
+      }
+      if (data.paging) {
+        setPagingStats(data.paging);
       }
 
       // 2. FileSystem telemetry (Directories + Files)
@@ -506,6 +540,29 @@ export default function App() {
   };
 
   // 🚀 SOCKET EMITS TO C++ ENGINE
+  const stepSimulation = () => {
+    socket.emit('cmd:step');
+    setToast('Stepped simulation clock by 1 tick.');
+  };
+
+  const toggleClock = () => {
+    if (isClockRunning) {
+      socket.emit('timer:pause');
+      setIsClockRunning(false);
+      setToast('Simulation clock paused.');
+    } else {
+      socket.emit('timer:start', { intervalMs: 1000 });
+      setIsClockRunning(true);
+      setToast('Simulation clock running (1 tick/sec).');
+    }
+  };
+
+  const resetSimulation = () => {
+    socket.emit('cmd:reset');
+    setIsClockRunning(false);
+    setToast('Simulation reset to Tick 0.');
+  };
+
   const addProcess = (event) => {
     event.preventDefault();
     const name = newProcName.trim();
@@ -527,7 +584,11 @@ export default function App() {
     });
 
     setNewProcName('');
-    setToast(`Requested creation of process: ${name}`);
+    if (!isClockRunning) {
+      setToast(`Created "${name}". Click "Step (1 Tick)" or "Run Clock" to start simulation!`);
+    } else {
+      setToast(`Created "${name}" — running in simulation.`);
+    }
   };
 
 
@@ -535,6 +596,28 @@ export default function App() {
     socket.emit('cmd:kill_process', { pid });
     setHiddenPIDs(prev => new Set(prev).add(pid)); // Visually hide it instantly
     setToast(`Sent kill signal for PID ${pid}.`);
+  };
+
+  const setPagePolicy = (policy) => {
+    socket.emit('cmd:set_page_policy', { policy });
+    setToast(`Page replacement policy set to ${policy}.`);
+  };
+
+  const setAllocStrategy = (type) => {
+    socket.emit('cmd:set_alloc', { type });
+    setActiveAllocStrategy(type);
+    setToast(`Memory allocation strategy switched to ${type}.`);
+  };
+
+  const compactMemory = () => {
+    socket.emit('cmd:compact');
+    setToast('Triggered contiguous memory compaction.');
+  };
+
+  const testAccessMemory = (pid, addr) => {
+    if (!pid || pid === 'ALL') return setToast('Select a valid process.');
+    socket.emit('cmd:access_mem', { pid, logicalAddress: Number(addr) || 0 });
+    setToast(`Accessed address 0x${addr} for process ${pid}.`);
   };
 
   const runSchedulerSimulation = () => {
@@ -552,6 +635,7 @@ export default function App() {
     // 2. Still send commands to C++ so the backend data stays in sync
     socket.emit('cmd:set_scheduler', { type: schedAlgo, quantum: timeQuantum });
     socket.emit('timer:start', { intervalMs: 1000 });
+    setIsClockRunning(true);
     
     setSchedulerLog((prev) => [`[dispatch] Selected ${schedAlgo}. Auto-stepping started.`, ...prev].slice(0, 12));
     setToast('Simulation completed visuals & backend clock started...');
@@ -716,14 +800,14 @@ export default function App() {
     const args = command.split(/\s+/);
     let output = `$ ${command}`;
     switch (args[0]) {
-      case 'help': output += '\nCommands: help, clear, ps, ls, cd <folder|..>, mkdir <name>, touch <name>, top, mem, uname, date, pwd, spawn <name> <burst>, kill <pid>'; break;
+      case 'help': output += '\nCommands: help, clear, ps, ls, cd <folder|..>, mkdir <name>, touch <name>, top, mem, uname, date, pwd, spawn <name> <burst>, kill <pid>, step, run, pause, reset, tick'; break;
       case 'clear': setTermHistory(['MINIOS shell 2.4.0', '']); setTermInput(''); return;
       case 'ps': output += '\nPID  STATE      PRI  BURST  REMAIN  NAME\n' + processes.filter(p => !hiddenPIDs.has(p.pid)).map((p) => `${String(p.pid).padEnd(4)} ${p.state.padEnd(10)} ${String(p.priority).padEnd(4)} ${String(`${p.burst}u`).padEnd(6)} ${String(`${p.remaining}u`).padEnd(6)} ${p.name}`).join('\n'); break;
       case 'ls':
         output += '\n' + (visibleFiles.length ? visibleFiles.map((file) => `${file.type === 'dir' ? 'd' : '-'}  ${file.name}`).join('\n') : '(empty directory)');
         break;
       case 'top': output += `\nSimulated CPU activity: ${Math.min(96, 12 + activeProcesses * 11)}%\nRunnable processes: ${activeProcesses}\nTelemetry values are simulated, not host-machine measurements.`; break;
-      case 'mem': output += `\nSimulated physical memory: ${memoryStats?.totalMemory || 100} MB\nAllocated: ${memoryStats?.usedMemory || 0} MB\nFree: ${memoryStats?.freeMemory || 100} MB\nExternal Fragmentation: ${Number(memoryStats?.externalFragmentation || 0).toFixed(1)}%`; break;
+      case 'mem': output += `\n[Contiguous Partitions]\nTotal RAM: ${memoryStats?.totalMemory || 100} MB | Allocated: ${memoryStats?.usedMemory || 0} MB | Free: ${memoryStats?.freeMemory || 100} MB\nExternal Fragmentation: ${Number(memoryStats?.externalFragmentation || 0).toFixed(1)}%\n[Paging Subsystem]\nTotal Frames: ${pagingStats?.totalFrames || 64} (${pagingStats?.pageSize || 4} KB/frame) | Free: ${pagingStats?.freeFrames ?? 64} | Used: ${pagingStats?.usedFrames ?? 0} | Faults: ${pagingStats?.pageFaults || 0} | Policy: ${pagingStats?.policy || 'LRU'}`; break;
       case 'uname': output += '\nMINIOS 2.4.0 nitw-cse x86_64-simulated'; break;
       case 'date': output += `\n${currentTime.toString()}`; break;
       case 'pwd':
@@ -807,6 +891,33 @@ export default function App() {
           setHiddenPIDs(prev => new Set(prev).add(pidStr));
           output += `\nSent kill signal for PID ${pidStr}.`;
         } else output += '\nUsage: kill <existing-pid>';
+        break;
+      }
+      case 'step': {
+        socket.emit('cmd:step');
+        output += `\nAdvanced simulation clock by 1 tick. Current tick: ${currentTick + 1}`;
+        break;
+      }
+      case 'run': {
+        socket.emit('timer:start', { intervalMs: 1000 });
+        setIsClockRunning(true);
+        output += '\nSimulation clock started (1 tick/sec). Processes will run automatically.';
+        break;
+      }
+      case 'pause': {
+        socket.emit('timer:pause');
+        setIsClockRunning(false);
+        output += '\nSimulation clock paused.';
+        break;
+      }
+      case 'reset': {
+        socket.emit('cmd:reset');
+        setIsClockRunning(false);
+        output += '\nSimulation reset to Tick 0. All processes cleared.';
+        break;
+      }
+      case 'tick': {
+        output += `\nCurrent simulation tick: ${currentTick} (${isClockRunning ? 'running' : 'paused'})`;
         break;
       }
       default: output += `\n${args[0]}: command not found. Type 'help' for commands.`;
@@ -968,7 +1079,51 @@ export default function App() {
             <div className={`min-h-0 flex-1 ${win.id === 'terminal' ? 'overflow-hidden p-3' : 'overflow-auto p-5'}`}>
               {win.id === 'process-manager' && (
                 <div>
-                  <SectionHeading eyebrow="Kernel / Process table" title="Process manager" description="Inspect process states and create or terminate simulated processes." icon={Cpu} action={<span className="rounded-md border border-white/[0.08] bg-white/[0.035] px-2.5 py-1.5 text-[11px] text-slate-400"><span className="font-semibold text-slate-200">{processes.filter(p => !hiddenPIDs.has(p.pid)).length}</span> processes</span>} />
+                  <SectionHeading 
+                    eyebrow="Kernel / Process table" 
+                    title="Process manager" 
+                    description="Inspect process states, advance simulation clock, and create simulated processes." 
+                    icon={Cpu} 
+                    action={
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="flex items-center gap-1.5 rounded-lg border border-white/[0.08] bg-black/40 px-3 py-1.5 text-xs font-mono">
+                          <Clock3 className="h-3.5 w-3.5 text-sky-400" />
+                          <span className="text-slate-400">Tick</span>
+                          <span className="font-bold text-sky-300">{currentTick}</span>
+                          <span className={`ml-1.5 inline-block h-2 w-2 rounded-full ${isClockRunning ? 'animate-pulse bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : 'bg-slate-500'}`} />
+                          <span className="text-[10px] text-slate-400">{isClockRunning ? 'Running' : 'Paused'}</span>
+                        </div>
+                        <button 
+                          onClick={stepSimulation} 
+                          title="Advance simulation clock by 1 tick" 
+                          className="flex items-center gap-1 rounded-lg border border-sky-400/30 bg-sky-500/10 px-2.5 py-1.5 text-xs font-medium text-sky-300 transition hover:bg-sky-500/20 active:scale-95"
+                        >
+                          <Play className="h-3 w-3" /> Step (1 Tick)
+                        </button>
+                        <button 
+                          onClick={toggleClock} 
+                          title={isClockRunning ? "Pause clock" : "Start continuous 1-tick/sec simulation"} 
+                          className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition active:scale-95 ${
+                            isClockRunning 
+                              ? 'border-amber-400/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20' 
+                              : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20'
+                          }`}
+                        >
+                          {isClockRunning ? <><Pause className="h-3 w-3" /> Pause Clock</> : <><Play className="h-3 w-3" /> Run Clock</>}
+                        </button>
+                        <button 
+                          onClick={resetSimulation} 
+                          title="Reset simulation back to Tick 0" 
+                          className="flex items-center gap-1 rounded-lg border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-xs text-slate-400 transition hover:bg-white/[0.08] hover:text-slate-200"
+                        >
+                          <RotateCcw className="h-3 w-3" /> Reset
+                        </button>
+                        <span className="rounded-md border border-white/[0.08] bg-white/[0.035] px-2.5 py-1.5 text-[11px] text-slate-400">
+                          <span className="font-semibold text-slate-200">{processes.filter(p => !hiddenPIDs.has(p.pid)).length}</span> processes
+                        </span>
+                      </div>
+                    } 
+                  />
                   <div className="overflow-x-auto rounded-xl border border-white/[0.08]">
                     <table className="w-full min-w-[690px] text-left text-xs">
                       <thead className="bg-white/[0.035] text-[10px] uppercase tracking-[0.11em] text-slate-500">
@@ -979,7 +1134,22 @@ export default function App() {
                           <tr key={process.pid} className="transition hover:bg-white/[0.025]">
                             <td className="px-3.5 py-3 font-mono text-slate-400">{String(process.pid).padStart(3, '0')}</td>
                             <td className="px-3.5 py-3 font-medium text-slate-200">{process.name}</td>
-                            <td className="px-3.5 py-3"><span className={`rounded-md border px-2 py-1 text-[10px] font-medium ${process.state === 'RUNNING' ? 'border-emerald-400/20 bg-emerald-400/[0.08] text-emerald-300' : process.state === 'READY' ? 'border-amber-300/20 bg-amber-300/[0.07] text-amber-200' : 'border-slate-400/15 bg-slate-400/[0.06] text-slate-400'}`}>{process.state}</span></td>
+                            <td className="px-3.5 py-3">
+                              <span className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium ${
+                                process.state === 'RUNNING' 
+                                  ? 'border-emerald-400/20 bg-emerald-400/[0.08] text-emerald-300' 
+                                  : process.state === 'READY' 
+                                  ? 'border-amber-300/20 bg-amber-300/[0.07] text-amber-200' 
+                                  : process.state === 'NEW'
+                                  ? 'border-sky-400/30 bg-sky-400/[0.1] text-sky-300'
+                                  : process.state === 'BLOCKED'
+                                  ? 'border-rose-400/30 bg-rose-400/[0.1] text-rose-300'
+                                  : 'border-slate-400/15 bg-slate-400/[0.06] text-slate-400'
+                              }`}>
+                                {process.state}
+                                {process.state === 'NEW' && <span className="font-mono text-[9px] text-slate-400">arr:{process.arrivalTime ?? 0}</span>}
+                              </span>
+                            </td>
                             <td className="px-3.5 py-3 font-mono text-slate-400">{process.priority}</td>
                             <td className="px-3.5 py-3 font-mono text-slate-400">{process.burst}u</td>
                             <td className="px-3.5 py-3 font-mono text-slate-300">{process.remaining}u</td>
@@ -990,15 +1160,34 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
-                    <form onSubmit={addProcess} className="mt-5 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
-                    <div className="mb-3 flex items-center gap-2"><Plus className="h-4 w-4 text-slate-400" /><h3 className="text-xs font-semibold text-slate-200">Create process</h3></div>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_90px_90px_90px_90px_auto]">
+                  <form onSubmit={addProcess} className="mt-5 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                    <div className="mb-3 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Plus className="h-4 w-4 text-slate-400" />
+                        <h3 className="text-xs font-semibold text-slate-200">Create process</h3>
+                      </div>
+                      <span className="text-[10px] text-slate-500">
+                        Arrival 0 admits immediately once simulation steps (Current Tick: {currentTick})
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_85px_85px_85px_85px_auto_auto]">
                       <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Name</span><input value={newProcName} onChange={(e) => setNewProcName(e.target.value)} placeholder="e.g. worker_job" className="field w-full" /></label>
                       <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Burst (u)</span><input type="number" min="1" value={newProcBurst} onChange={(e) => setNewProcBurst(e.target.value)} className="field w-full" /></label>
                       <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">RAM (MB)</span><input type="number" min="1" value={newProcMemory} onChange={(e) => setNewProcMemory(e.target.value)} className="field w-full" /></label>
                       <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Priority</span><input type="number" min="0" value={newProcPriority} onChange={(e) => setNewProcPriority(e.target.value)} className="field w-full" /></label>
                       <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Arrival</span><input type="number" min="0" value={newProcArrival} onChange={(e) => setNewProcArrival(e.target.value)} className="field w-full" /></label>
-                      <button type="submit" className="self-end rounded-lg bg-slate-100 px-4 py-2.5 text-xs font-semibold text-slate-900 transition hover:bg-white"><Plus className="mr-1 inline h-3.5 w-3.5" />Create</button>
+                      <button type="submit" className="self-end rounded-lg bg-slate-100 px-3.5 py-2.5 text-xs font-semibold text-slate-900 transition hover:bg-white"><Plus className="mr-1 inline h-3.5 w-3.5" />Create</button>
+                      <button 
+                        type="button" 
+                        onClick={(e) => {
+                          addProcess(e);
+                          setTimeout(() => socket.emit('cmd:step'), 150);
+                        }} 
+                        title="Create process and advance clock by 1 tick immediately"
+                        className="self-end rounded-lg border border-sky-400/30 bg-sky-500/20 px-3.5 py-2.5 text-xs font-semibold text-sky-200 transition hover:bg-sky-500/30"
+                      >
+                        <Play className="mr-1 inline h-3.5 w-3.5" />Create & Step
+                      </button>
                     </div>
                   </form>
                 </div>
@@ -1083,9 +1272,433 @@ export default function App() {
 
               {win.id === 'memory' && (
                 <div>
-                  <SectionHeading eyebrow="Kernel / Memory" title="Memory and paging" description="Illustrative memory figures for the simulator, not your computer's actual RAM usage." icon={HardDrive} action={<span className="rounded-md border border-white/[0.08] px-2.5 py-1.5 text-[10px] text-slate-400">Page size <b className="ml-1 text-slate-200">4 KB</b></span>} />
-                  <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3"><StatCard label="Physical memory" value="4,096 MB" helper="Simulated capacity" icon={HardDrive} /><StatCard label="Allocated" value="1,842 MB" helper="Sample data" icon={Activity} /><StatCard label="Page faults" value="2" helper="Sample run" icon={Zap} /></div>
-                  <div className="rounded-xl border border-white/[0.08] bg-[#101317] p-4"><div className="mb-4 flex items-center justify-between"><h3 className="text-xs font-semibold text-slate-300">Physical frame map</h3><div className="flex items-center gap-3 text-[10px] text-slate-500"><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-sm bg-sky-300/70" />Allocated</span><span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-sm bg-slate-700" />Free</span></div></div><div className="grid grid-cols-8 gap-2 sm:grid-cols-16">{Array.from({ length: 64 }).map((_, index) => <div key={index} title={`Frame ${index}: ${index < 29 ? 'allocated' : 'free'}`} className={`flex aspect-square items-center justify-center rounded-md border text-[10px] font-mono ${index < 29 ? 'border-sky-300/20 bg-sky-300/[0.12] text-sky-200/80' : 'border-white/[0.035] bg-white/[0.025] text-slate-600'}`}>{index}</div>)}</div></div>
+                  <SectionHeading
+                    eyebrow="Kernel / Memory & Paging Subsystem"
+                    title="Memory management & Paging"
+                    description="Real-time telemetry stream directly from the C++ MiniOS kernel engine."
+                    icon={HardDrive}
+                    action={
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-md border border-white/[0.08] px-2.5 py-1.5 text-[10px] text-slate-400">
+                          Page size <b className="ml-1 text-slate-200">{pagingStats?.pageSize || 4} KB</b>
+                        </span>
+                        <div className="inline-flex rounded-lg border border-white/[0.08] bg-black/30 p-0.5">
+                          <button
+                            type="button"
+                            onClick={() => setMemoryTab('paging')}
+                            className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition ${
+                              memoryTab === 'paging' ? 'bg-sky-500/20 text-sky-200 border border-sky-400/30' : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            Paging & Frames
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setMemoryTab('partitions')}
+                            className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition ${
+                              memoryTab === 'partitions' ? 'bg-sky-500/20 text-sky-200 border border-sky-400/30' : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            Contiguous Partitions
+                          </button>
+                        </div>
+                      </div>
+                    }
+                  />
+
+                  {memoryTab === 'paging' ? (
+                    <>
+                      {/* Paging Metrics */}
+                      <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-4">
+                        <StatCard
+                          label="Total Frames"
+                          value={pagingStats?.totalFrames || 64}
+                          helper={`${pagingStats?.totalMemory || 256} KB physical space`}
+                          icon={HardDrive}
+                        />
+                        <StatCard
+                          label="Allocated Frames"
+                          value={`${pagingStats?.usedFrames ?? ((pagingStats?.totalFrames || 64) - (pagingStats?.freeFrames || 64))} / ${pagingStats?.totalFrames || 64}`}
+                          helper={`${pagingStats?.freeFrames ?? 64} frames available`}
+                          icon={Activity}
+                        />
+                        <StatCard
+                          label="Page Faults"
+                          value={pagingStats?.pageFaults ?? 0}
+                          helper="Demand paging misses"
+                          icon={Zap}
+                        />
+                        <div className="flex flex-col justify-between rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] text-slate-400">Page Policy</span>
+                            <SlidersHorizontal className="h-4 w-4 text-sky-400" />
+                          </div>
+                          <div className="mt-2 flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setPagePolicy('LRU')}
+                              className={`flex-1 rounded-md py-1 text-center font-mono text-xs font-semibold transition ${
+                                (pagingStats?.policy || 'LRU') === 'LRU'
+                                  ? 'bg-sky-400/20 text-sky-200 border border-sky-400/40'
+                                  : 'bg-white/[0.04] text-slate-400 hover:bg-white/[0.08]'
+                              }`}
+                            >
+                              LRU
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setPagePolicy('FIFO')}
+                              className={`flex-1 rounded-md py-1 text-center font-mono text-xs font-semibold transition ${
+                                (pagingStats?.policy || 'LRU') === 'FIFO'
+                                  ? 'bg-sky-400/20 text-sky-200 border border-sky-400/40'
+                                  : 'bg-white/[0.04] text-slate-400 hover:bg-white/[0.08]'
+                              }`}
+                            >
+                              FIFO
+                            </button>
+                          </div>
+                          <span className="mt-1 text-[10px] text-slate-500">Replacement algorithm</span>
+                        </div>
+                      </div>
+
+                      {/* Physical Frame Map */}
+                      <div className="mb-5 rounded-xl border border-white/[0.08] bg-[#101317] p-4">
+                        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <h3 className="text-xs font-semibold text-slate-200">Physical Frame Allocation Map</h3>
+                            <p className="text-[10px] text-slate-500">64 physical frames (4 KB each). Click an allocated frame to filter its process.</p>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-3 text-[10px] text-slate-400">
+                            <span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-sm bg-sky-400" />Allocated</span>
+                            <span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-sm bg-slate-700" />Free</span>
+                            {selectedPagingPID !== 'ALL' && (
+                              <button
+                                type="button"
+                                onClick={() => setSelectedPagingPID('ALL')}
+                                className="rounded bg-white/[0.08] px-2 py-0.5 text-slate-300 hover:bg-white/[0.15]"
+                              >
+                                Clear Filter
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-8 gap-1.5 sm:grid-cols-16">
+                          {(pagingStats?.frames && pagingStats.frames.length > 0
+                            ? pagingStats.frames
+                            : Array.from({ length: 64 }).map((_, index) => ({ frameId: index, isFree: true, processPID: '', pageNumber: -1 }))
+                          ).map((frame) => {
+                            const isAlloc = !frame.isFree;
+                            const isSelectedProc = selectedPagingPID !== 'ALL' && frame.processPID === selectedPagingPID;
+                            const color = getProcColor(frame.processPID);
+
+                            return (
+                              <button
+                                key={frame.frameId}
+                                type="button"
+                                onClick={() => {
+                                  if (frame.processPID) setSelectedPagingPID(frame.processPID);
+                                }}
+                                title={
+                                  isAlloc
+                                    ? `Frame #${frame.frameId}: Process ${frame.processPID} (Page ${frame.pageNumber})`
+                                    : `Frame #${frame.frameId}: Free`
+                                }
+                                className={`group relative flex aspect-square flex-col items-center justify-center rounded-md border text-[10px] font-mono transition duration-150 ${
+                                  isAlloc
+                                    ? isSelectedProc
+                                      ? 'border-sky-300 bg-sky-400/30 text-white ring-2 ring-sky-300/50 shadow-[0_0_12px_rgba(56,189,248,0.3)]'
+                                      : `${color.border} ${color.bg} ${color.text} hover:scale-105`
+                                    : 'border-white/[0.04] bg-white/[0.02] text-slate-600 hover:border-white/[0.1]'
+                                }`}
+                              >
+                                <span className="text-[9px] font-semibold">{frame.frameId}</span>
+                                {isAlloc && (
+                                  <span className="mt-0.5 scale-90 truncate font-mono text-[8px] font-bold tracking-tighter opacity-90">
+                                    {frame.processPID}
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Process Page Tables Viewer & Live Address Translation Tester */}
+                      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                        <div className="rounded-xl border border-white/[0.08] bg-[#101317] p-4 lg:col-span-2">
+                          <div className="mb-3 flex items-center justify-between">
+                            <div>
+                              <h3 className="text-xs font-semibold text-slate-200">Process Page Tables</h3>
+                              <p className="text-[10px] text-slate-500">Virtual page to physical frame translations</p>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[10px] text-slate-400">Filter:</span>
+                              <select
+                                value={selectedPagingPID}
+                                onChange={(e) => setSelectedPagingPID(e.target.value)}
+                                className="rounded border border-white/[0.1] bg-white/[0.04] px-2 py-1 text-[11px] text-slate-200 outline-none"
+                              >
+                                <option value="ALL">All Processes</option>
+                                {pagingStats?.pageTables &&
+                                  Object.keys(pagingStats.pageTables).map((pid) => (
+                                    <option key={pid} value={pid}>
+                                      Process {pid}
+                                    </option>
+                                  ))}
+                              </select>
+                            </div>
+                          </div>
+
+                          <div className="max-h-[260px] overflow-y-auto">
+                            {pagingStats?.pageTables && Object.keys(pagingStats.pageTables).length > 0 ? (
+                              Object.entries(pagingStats.pageTables)
+                                .filter(([pid]) => selectedPagingPID === 'ALL' || pid === selectedPagingPID)
+                                .map(([pid, entries]) => {
+                                  const color = getProcColor(pid);
+                                  return (
+                                    <div key={pid} className="mb-3 rounded-lg border border-white/[0.06] bg-white/[0.015] p-3 last:mb-0">
+                                      <div className="mb-2 flex items-center justify-between">
+                                        <div className="flex items-center gap-2">
+                                          <span className={`h-2 w-2 rounded-full ${color.dot}`} />
+                                          <span className="font-mono text-xs font-semibold text-slate-200">Process {pid}</span>
+                                          <span className="text-[10px] text-slate-500">({entries.length} virtual pages)</span>
+                                        </div>
+                                        <span className="text-[10px] text-slate-400">
+                                          {entries.filter((e) => e.valid).length} in RAM · {entries.filter((e) => !e.valid).length} swapped
+                                        </span>
+                                      </div>
+                                      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4 md:grid-cols-6">
+                                        {entries.map((entry) => (
+                                          <div
+                                            key={entry.pageNumber}
+                                            className={`rounded-md border p-1.5 text-center font-mono text-[10px] ${
+                                              entry.valid
+                                                ? 'border-emerald-400/25 bg-emerald-400/[0.08] text-emerald-200'
+                                                : 'border-rose-400/20 bg-rose-400/[0.05] text-rose-300'
+                                            }`}
+                                          >
+                                            <div className="text-[9px] text-slate-400">Page {entry.pageNumber}</div>
+                                            <div className="font-semibold">{entry.valid ? `Frame ${entry.frameNumber}` : 'Swapped'}</div>
+                                            <div className="text-[8px] text-slate-500">t={entry.lastAccessTime}</div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  );
+                                })
+                            ) : (
+                              <div className="py-8 text-center text-xs text-slate-500">
+                                No active processes allocated in virtual memory. Spawn a process in Process Manager to view its page table.
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Interactive Memory Access Tester */}
+                        <div className="flex flex-col justify-between rounded-xl border border-white/[0.08] bg-[#101317] p-4">
+                          <div>
+                            <div className="mb-2 flex items-center gap-2">
+                              <Zap className="h-4 w-4 text-amber-300" />
+                              <h3 className="text-xs font-semibold text-slate-200">Translate Logical Address</h3>
+                            </div>
+                            <p className="mb-4 text-[11px] leading-relaxed text-slate-400">
+                              Simulate an MMU memory reference. Active pages register cache hits; missing pages trigger demand page faults and LRU/FIFO eviction.
+                            </p>
+
+                            <div className="space-y-3">
+                              <label className="block">
+                                <span className="mb-1 block text-[10px] text-slate-400">Target Process</span>
+                                <select
+                                  value={selectedPagingPID === 'ALL' ? (Object.keys(pagingStats?.pageTables || {})[0] || '') : selectedPagingPID}
+                                  onChange={(e) => setSelectedPagingPID(e.target.value)}
+                                  className="field w-full text-xs"
+                                >
+                                  {pagingStats?.pageTables && Object.keys(pagingStats.pageTables).length > 0 ? (
+                                    Object.keys(pagingStats.pageTables).map((pid) => (
+                                      <option key={pid} value={pid}>
+                                        Process {pid}
+                                      </option>
+                                    ))
+                                  ) : (
+                                    <option value="">No active process</option>
+                                  )}
+                                </select>
+                              </label>
+
+                              <label className="block">
+                                <span className="mb-1 block text-[10px] text-slate-400">Logical Address (offset)</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={testLogicalAddr}
+                                  onChange={(e) => setTestLogicalAddr(e.target.value)}
+                                  className="field w-full text-xs"
+                                  placeholder="e.g. 0, 4, 8"
+                                />
+                              </label>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const pid = selectedPagingPID === 'ALL' ? Object.keys(pagingStats?.pageTables || {})[0] : selectedPagingPID;
+                              testAccessMemory(pid, testLogicalAddr);
+                            }}
+                            disabled={!pagingStats?.pageTables || Object.keys(pagingStats.pageTables).length === 0}
+                            className="mt-4 flex w-full items-center justify-center gap-1.5 rounded-lg bg-sky-500 py-2 text-xs font-semibold text-slate-950 transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            <Play className="h-3.5 w-3.5" />
+                            Reference Address
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      {/* Contiguous Partitions View */}
+                      <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-4">
+                        <StatCard
+                          label="Physical RAM"
+                          value={`${memoryStats?.totalMemory || 100} MB`}
+                          helper="Simulated capacity"
+                          icon={HardDrive}
+                        />
+                        <StatCard
+                          label="Allocated Space"
+                          value={`${memoryStats?.usedMemory || 0} MB`}
+                          helper={`${memoryStats?.freeMemory || 100} MB free`}
+                          icon={Activity}
+                        />
+                        <StatCard
+                          label="External Fragmentation"
+                          value={`${Number(memoryStats?.externalFragmentation || 0).toFixed(1)}%`}
+                          helper="Scattered free space"
+                          icon={SlidersHorizontal}
+                        />
+                        <div className="flex flex-col justify-between rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] text-slate-400">Partition Allocator</span>
+                            <SlidersHorizontal className="h-4 w-4 text-emerald-400" />
+                          </div>
+                          <div className="mt-2 flex items-center gap-1">
+                            {['FirstFit', 'BestFit', 'WorstFit'].map((strat) => (
+                              <button
+                                key={strat}
+                                type="button"
+                                onClick={() => setAllocStrategy(strat)}
+                                className={`flex-1 rounded py-1 text-center font-mono text-[10px] font-semibold transition ${
+                                  activeAllocStrategy === strat
+                                    ? 'bg-emerald-400/20 text-emerald-200 border border-emerald-400/40'
+                                    : 'bg-white/[0.04] text-slate-400 hover:bg-white/[0.08]'
+                                }`}
+                              >
+                                {strat.replace('Fit', '')}
+                              </button>
+                            ))}
+                          </div>
+                          <span className="mt-1 text-[10px] text-slate-500">Current: {activeAllocStrategy}</span>
+                        </div>
+                      </div>
+
+                      {/* Memory Layout Partition Bar */}
+                      <div className="mb-5 rounded-xl border border-white/[0.08] bg-[#101317] p-4">
+                        <div className="mb-3 flex items-center justify-between">
+                          <div>
+                            <h3 className="text-xs font-semibold text-slate-200">Continuous Memory Address Space (0 – {memoryStats?.totalMemory || 100} MB)</h3>
+                            <p className="text-[10px] text-slate-500">Partition layout with real-time process block placement</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={compactMemory}
+                            className="flex items-center gap-1.5 rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-xs font-medium text-emerald-200 transition hover:bg-emerald-400/20"
+                          >
+                            <Minimize2 className="h-3.5 w-3.5" />
+                            Compact RAM (Defragment)
+                          </button>
+                        </div>
+
+                        {/* Visual Bar */}
+                        <div className="mb-4 flex h-10 w-full overflow-hidden rounded-lg border border-white/[0.1] bg-black/40">
+                          {memoryStats?.blocks && memoryStats.blocks.length > 0 ? (
+                            memoryStats.blocks.map((block, idx) => {
+                              const pct = Math.max(2, (block.size / (memoryStats.totalMemory || 100)) * 100);
+                              const color = getProcColor(block.processPID);
+                              return (
+                                <div
+                                  key={idx}
+                                  style={{ width: `${pct}%` }}
+                                  title={
+                                    block.isFree
+                                      ? `Free Block: ${block.size} MB (${block.start} - ${block.end})`
+                                      : `Process ${block.processPID}: ${block.size} MB (${block.start} - ${block.end})`
+                                  }
+                                  className={`relative flex h-full items-center justify-center border-r border-black/50 text-[10px] font-mono font-medium transition ${
+                                    block.isFree
+                                      ? 'bg-slate-800/40 text-slate-500'
+                                      : `${color.bg} ${color.text} font-semibold`
+                                  }`}
+                                >
+                                  <span className="truncate px-1">
+                                    {block.isFree ? `Free ${block.size}M` : `${block.processPID} (${block.size}M)`}
+                                  </span>
+                                </div>
+                              );
+                            })
+                          ) : (
+                            <div className="flex h-full w-full items-center justify-center text-xs text-slate-500">
+                              Free Memory (100 MB)
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Partition Blocks Table */}
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left font-mono text-[11px]">
+                            <thead className="border-b border-white/[0.08] text-[10px] uppercase text-slate-500">
+                              <tr>
+                                <th className="pb-2">Block #</th>
+                                <th className="pb-2">Range</th>
+                                <th className="pb-2">Size</th>
+                                <th className="pb-2">Owner PID</th>
+                                <th className="pb-2 text-right">Status</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-white/[0.04]">
+                              {memoryStats?.blocks && memoryStats.blocks.length > 0 ? (
+                                memoryStats.blocks.map((block, idx) => (
+                                  <tr key={idx} className="hover:bg-white/[0.02]">
+                                    <td className="py-2 text-slate-400">Block {idx}</td>
+                                    <td className="py-2 text-slate-300">0x{block.start} – 0x{block.end}</td>
+                                    <td className="py-2 text-slate-200">{block.size} MB</td>
+                                    <td className="py-2">{block.processPID || '—'}</td>
+                                    <td className="py-2 text-right">
+                                      <span
+                                        className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                                          block.isFree
+                                            ? 'bg-slate-700/40 text-slate-400'
+                                            : 'bg-emerald-400/15 text-emerald-300 border border-emerald-400/30'
+                                        }`}
+                                      >
+                                        {block.isFree ? 'FREE' : 'OCCUPIED'}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                ))
+                              ) : (
+                                <tr>
+                                  <td colSpan="5" className="py-4 text-center text-slate-500">
+                                    No partition data available.
+                                  </td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
 

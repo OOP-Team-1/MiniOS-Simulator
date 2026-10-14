@@ -9,6 +9,7 @@
 #include "CPU.h"
 #include "Scheduler.h"
 #include "MemoryManager.h"
+#include "PagingManager.h"
 #include "FileSystem.h"
 
 class SimulationEngine
@@ -18,6 +19,7 @@ private:
     CPU cpu;
     Scheduler* scheduler;
     MemoryManager* memoryManager;
+    PagingManager* pagingManager;
     FileSystem* fileSystem;
 
     int currentTick;
@@ -32,6 +34,13 @@ private:
     void checkPendingProcesses();
 
 public:
+    SimulationEngine(
+        MemoryManager& memManager,
+        PagingManager& pagingManager,
+        FileSystem& fileSystem,
+        Scheduler& cpuScheduler
+    );
+
     SimulationEngine(
         MemoryManager& memManager,
         FileSystem& fileSystem,
@@ -71,6 +80,8 @@ public:
 
     void setScheduler(Scheduler& newScheduler);
     void setMemoryManager(MemoryManager& newMemoryManager);
+    void setPagingManager(PagingManager& newPagingManager);
+    AddressTranslationResult accessMemory(const std::string& pid, int logicalAddress);
 
     // Advances simulation by exactly one tick
     bool step();
@@ -83,6 +94,7 @@ public:
     bool killProcess(const std::string& pid);
 
     void compactDisk();
+    void compactMemory();
 
     bool renameFile(const std::string& fileId, const std::string& newName);
 

@@ -288,14 +288,40 @@ const std::vector<PageTableEntry>* PagingManager::getPageTable(const std::string
     return nullptr;
 }
 
+void PagingManager::setPolicy(ReplacementPolicy newPolicy)
+{
+    this->policy = newPolicy;
+}
+
+ReplacementPolicy PagingManager::getPolicy() const
+{
+    return this->policy;
+}
+
+void PagingManager::reset()
+{
+    pageFaultCount = 0;
+    fifoQueue.clear();
+    pageTables.clear();
+    processSizes.clear();
+    for (int i = 0; i < totalFrames; ++i)
+    {
+        frames[i].isFree = true;
+        frames[i].processPID = "";
+        frames[i].pageNumber = -1;
+    }
+}
+
 std::string PagingManager::getSnapshotAsJson() const
 {
     std::ostringstream ss;
+    int freeFrames = getFreeFramesCount();
     ss << "{\n";
     ss << "  \"totalMemory\": " << totalMemory << ",\n";
     ss << "  \"pageSize\": " << pageSize << ",\n";
     ss << "  \"totalFrames\": " << totalFrames << ",\n";
-    ss << "  \"freeFrames\": " << getFreeFramesCount() << ",\n";
+    ss << "  \"freeFrames\": " << freeFrames << ",\n";
+    ss << "  \"usedFrames\": " << (totalFrames - freeFrames) << ",\n";
     ss << "  \"pageFaults\": " << pageFaultCount << ",\n";
     ss << "  \"policy\": \"" << (policy == ReplacementPolicy::LRU ? "LRU" : "FIFO") << "\",\n";
 

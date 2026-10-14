@@ -9,9 +9,7 @@ const candidates = [
     path.resolve(__dirname, '../../../engine/build/main.exe'),
     path.resolve(__dirname, '../../../engine/build/Debug/main.exe'),
     path.resolve(__dirname, '../../../engine/build/Release/main.exe'),
-    path.resolve(__dirname, '../../../engine/build/minios_engine.exe'),
-    path.resolve(__dirname, '../../../engine/build/main'),
-    path.resolve(__dirname, '../../../engine/build/minios_engine')
+    path.resolve(__dirname, '../../../engine/build/main')
 ];
 
 export const ENGINE_BINARY_PATH = candidates.find(p => fs.existsSync(p)) || candidates[0];

@@ -5,10 +5,28 @@
 
 SimulationEngine::SimulationEngine(
     MemoryManager& memManager,
+    PagingManager& pagManager,
     FileSystem& fs,
     Scheduler& cpuScheduler
 ) : scheduler(&cpuScheduler),
     memoryManager(&memManager),
+    pagingManager(&pagManager),
+    fileSystem(&fs),
+    currentTick(0),
+    lastExecutedPID("NONE"),
+    schedulerName("RR"),
+    schedulerQuantum(2),
+    allocName("FirstFit")
+{
+}
+
+SimulationEngine::SimulationEngine(
+    MemoryManager& memManager,
+    FileSystem& fs,
+    Scheduler& cpuScheduler
+) : scheduler(&cpuScheduler),
+    memoryManager(&memManager),
+    pagingManager(nullptr),
     fileSystem(&fs),
     currentTick(0),
     lastExecutedPID("NONE"),
@@ -38,13 +56,15 @@ Process& SimulationEngine::addProcess(
     int memoryRequired
 )
 {
-    return processManager.createProcess(
+    Process& proc = processManager.createProcess(
         name,
         priority,
         arrivalTime,
         burstTime,
         memoryRequired
     );
+    checkPendingProcesses();
+    return proc;
 }
 
 // ── Directory operation wrappers ────────────────────────────────────────────
@@ -205,6 +225,13 @@ void SimulationEngine::compactDisk()
     log("Disk compacted — all files relocated to contiguous blocks");
 }
 
+void SimulationEngine::compactMemory()
+{
+    memoryManager->compact();
+    log("RAM compacted — all active processes relocated contiguously to low memory");
+    checkPendingProcesses();
+}
+
 bool SimulationEngine::renameFile(const std::string& fileId, const std::string& newName)
 {
     bool ok = fileSystem->renameFile(fileId, newName);
@@ -225,6 +252,19 @@ void SimulationEngine::setScheduler(Scheduler& newScheduler)
 void SimulationEngine::setMemoryManager(MemoryManager& newMemoryManager)
 {
     this->memoryManager = &newMemoryManager;
+}
+
+void SimulationEngine::setPagingManager(PagingManager& newPagingManager)
+{
+    this->pagingManager = &newPagingManager;
+}
+
+AddressTranslationResult SimulationEngine::accessMemory(const std::string& pid, int logicalAddress)
+{
+    if (!pagingManager) return {};
+    auto res = pagingManager->accessAddress(pid, logicalAddress, currentTick);
+    log("Memory access for " + pid + " @ addr " + std::to_string(logicalAddress) + ": " + res.message);
+    return res;
 }
 
 void SimulationEngine::setCurrentSchedulerName(const std::string& name, int quantum)
@@ -259,6 +299,14 @@ void SimulationEngine::checkPendingProcesses()
 
                 if (allocated)
                 {
+                    if (pagingManager)
+                    {
+                        pagingManager->allocateProcess(
+                            process->getPID(),
+                            process->getMemoryRequired(),
+                            currentTick
+                        );
+                    }
                     process->setState(ProcessState::READY);
                     log("Process " + process->getPID() + " (" + process->getName() +
                         ") allocated " + std::to_string(process->getMemoryRequired()) +
@@ -315,11 +363,28 @@ bool SimulationEngine::step()
 
         cpu.execute(*processToRun, 1);
 
+        if (pagingManager && processToRun->getMemoryRequired() > 0)
+        {
+            int executedUnits = processToRun->getBurstTime() - processToRun->getRemainingTime();
+            int memReq = processToRun->getMemoryRequired();
+            int logicalAddr = (executedUnits * 4) % memReq;
+            auto trans = pagingManager->accessAddress(nextPID, logicalAddr, currentTick);
+            if (trans.pageFault)
+            {
+                log("Page fault for " + nextPID + " at logical addr " + std::to_string(logicalAddr) +
+                    " -> loaded into frame " + std::to_string(trans.frameNumber));
+            }
+        }
+
         // 3. On termination: free memory AND file system resources
         if (processToRun->getState() == "TERMINATED")
         {
             log("Process " + nextPID + " completed -> freeing memory and files");
             memoryManager->deallocate(nextPID);
+            if (pagingManager)
+            {
+                pagingManager->deallocateProcess(nextPID);
+            }
             fileSystem->handleProcessTermination(nextPID);
 
             // Re-check blocked processes now that memory may have freed up
@@ -348,6 +413,10 @@ void SimulationEngine::reset()
     systemLogs.clear();
     processManager.clear();
     memoryManager->reset();
+    if (pagingManager)
+    {
+        pagingManager->reset();
+    }
     fileSystem->reset();
     scheduler->reset();
     log("Simulation reset to initial state");
@@ -359,6 +428,10 @@ bool SimulationEngine::killProcess(const std::string& pid)
     if (!p) return false;
     p->setState(ProcessState::TERMINATED);
     memoryManager->deallocate(pid);
+    if (pagingManager)
+    {
+        pagingManager->deallocateProcess(pid);
+    }
     fileSystem->handleProcessTermination(pid);
     log("Process " + pid + " terminated");
     checkPendingProcesses();
@@ -431,6 +504,12 @@ std::string SimulationEngine::getTelemetryJson() const
 
     // Memory
     ss << "\"memory\":" << memoryManager->getSnapshotAsJson() << ",";
+
+    // Paging
+    if (pagingManager)
+    {
+        ss << "\"paging\":" << pagingManager->getSnapshotAsJson() << ",";
+    }
 
     // File System
     ss << "\"filesystem\":" << fileSystem->getSnapshotAsJson() << ",";

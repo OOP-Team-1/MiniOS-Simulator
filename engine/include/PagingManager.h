@@ -74,6 +74,10 @@ public:
     const std::vector<Frame>& getFrames() const;
     const std::vector<PageTableEntry>* getPageTable(const std::string& processPID) const;
 
+    void setPolicy(ReplacementPolicy newPolicy);
+    ReplacementPolicy getPolicy() const;
+    void reset();
+
     std::string getSnapshotAsJson() const;
     void displayState() const;
 };

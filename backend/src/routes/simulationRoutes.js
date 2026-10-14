@@ -1,5 +1,5 @@
 import express from 'express';
-import { getLatestTelemetry, sendCommand } from '../engine/processManager.js';
+import { getLatestTelemetry, sendCommand, killEngine, startEngine } from '../engine/processManager.js';
 
 const router = express.Router();
 
@@ -14,6 +14,17 @@ router.get('/state', (req, res) => {
 router.post('/step', (req, res) => {
     sendCommand("STEP");
     res.status(200).json({ status: 'OK', message: 'Step command dispatched' });
+});
+
+router.post('/engine/stop', (req, res) => {
+    killEngine();
+    res.status(200).json({ status: 'OK', message: 'Engine stopped' });
+});
+
+router.post('/engine/start', (req, res) => {
+    startEngine();
+    setTimeout(() => sendCommand("STATE"), 200);
+    res.status(200).json({ status: 'OK', message: 'Engine started' });
 });
 
 export default router;

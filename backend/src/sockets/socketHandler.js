@@ -45,6 +45,23 @@ export function registerSocketEvents(io) {
             if (!allowed.includes(type)) return;
             sendCommand(`SET_ALLOC ${type}`);
         });
+        // data: { policy: 'LRU'|'FIFO' }
+        socket.on('cmd:set_page_policy', (data) => {
+            if (!data) return;
+            const allowed = ['LRU', 'FIFO'];
+            const policy = String(data.policy).toUpperCase();
+            if (!allowed.includes(policy)) return;
+            sendCommand(`SET_PAGE_POLICY ${policy}`);
+        });
+        // data: { pid, logicalAddress }
+        socket.on('cmd:access_mem', (data) => {
+            if (!data) return;
+            const safePID = String(data.pid).replace(/[^a-zA-Z0-9_-]/g, '');
+            const addr = parseInt(data.logicalAddress, 10) || 0;
+            if (safePID) {
+                sendCommand(`ACCESS_MEM ${safePID} ${addr}`);
+            }
+        });
         // ── Process creation ──────────────────────────────────────────────────
         socket.on('cmd:add_process', (data) => {
             if (!data) return;
