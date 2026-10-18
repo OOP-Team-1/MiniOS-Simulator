@@ -1,20 +1,28 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity, ArrowUp, Battery, Check, ChevronDown, Clock3, Cpu, FileText,
-  Folder, FolderPlus, FolderOpen, HardDrive, LayoutGrid, FilePlus, Maximize2,
-  Minimize2, Monitor, Moon, Pause, Plus, Power, Play, RotateCcw, Search, Settings, ShieldCheck,
+  Activity, ArrowUp, Battery, Check, ChevronDown, ChevronRight, Clock3, Cpu, FileText,
+  Folder, FolderPlus, FolderOpen, HardDrive, LayoutGrid, FilePlus, LogOut, Maximize2,
+  Minimize2, Monitor, Moon, NotepadText, Pause, Pencil, Plus, Power, Play, RotateCcw, Search, Settings, ShieldCheck,
   SlidersHorizontal, Terminal, Trash2, Wifi, X, Zap,
 } from 'lucide-react';
-import { io } from 'socket.io-client';
+import { socket } from './lib/socket';
+import { normalizeUser } from './lib/user';
+import AuthScreen from './components/AuthScreen';
+import TextEditor from './components/TextEditor';
+import { loadBrowserSnapshotRecord, saveBrowserSnapshot } from './lib/vfsStore';
 
-// Connect to the Node.js backend
-const socket = io('http://localhost:5000');
+// Strips the ANSI colour/control sequences the C++ shell emits (ls colours,
+// `clear`, ...) so they don't show up as literal escape text in the terminal.
+const ANSI_PATTERN = /\u001b\[[0-9;]*[A-Za-z]/g;
+const stripAnsi = (text) => String(text ?? '').replace(ANSI_PATTERN, '');
+
 
 const INITIAL_APPS = [
   { id: 'process-manager', title: 'Processes', subtitle: 'Process manager', icon: Cpu },
   { id: 'scheduler', title: 'Scheduler', subtitle: 'CPU scheduling lab', icon: Activity },
   { id: 'terminal', title: 'Terminal', subtitle: 'MINIOS shell', icon: Terminal },
   { id: 'file-manager', title: 'Files', subtitle: 'Virtual file system', icon: FolderOpen },
+  { id: 'text-editor', title: 'Text Editor', subtitle: 'Notepad for .txt files', icon: NotepadText },
   { id: 'memory', title: 'Memory', subtitle: 'Memory and paging', icon: HardDrive },
   { id: 'system-monitor', title: 'System Monitor', subtitle: 'System telemetry', icon: Monitor },
   { id: 'settings', title: 'Settings', subtitle: 'Appearance and system', icon: Settings },
@@ -25,12 +33,17 @@ const INITIAL_WINDOWS = [
   { id: 'scheduler', title: 'CPU Scheduling Lab', isOpen: false, isMinimized: false, isMaximized: false, zIndex: 5, x: 160, y: 104, w: 900, h: 570 },
   { id: 'terminal', title: 'Terminal', isOpen: false, isMinimized: false, isMaximized: false, zIndex: 4, x: 185, y: 120, w: 760, h: 480 },
   { id: 'file-manager', title: 'Files', isOpen: false, isMinimized: false, isMaximized: false, zIndex: 3, x: 145, y: 96, w: 860, h: 540 },
+  { id: 'text-editor', title: 'Text Editor', isOpen: false, isMinimized: false, isMaximized: false, zIndex: 9, x: 165, y: 92, w: 880, h: 560 },
   { id: 'memory', title: 'Memory and Paging', isOpen: false, isMinimized: false, isMaximized: false, zIndex: 2, x: 165, y: 105, w: 860, h: 550 },
   { id: 'system-monitor', title: 'System Monitor', isOpen: false, isMinimized: false, isMaximized: false, zIndex: 1, x: 190, y: 125, w: 820, h: 520 },
   { id: 'settings', title: 'Settings', isOpen: false, isMinimized: false, isMaximized: false, zIndex: 0, x: 205, y: 130, w: 760, h: 500 },
 ];
 
 const getFileKey = (file) => file.id;
+
+// Monotonic id for "open this file in the text editor" requests, so handing the
+// same file twice still counts as a new request.
+let editorRequestSeq = 0;
 
 function getDisplayPath(dirId, directories) {
   if (!dirId || dirId === 'D0') return '/';
@@ -53,6 +66,7 @@ const APP_TONES = {
   scheduler: 'text-emerald-300 bg-emerald-400/10 border-emerald-300/20',
   terminal: 'text-violet-300 bg-violet-400/10 border-violet-300/20',
   'file-manager': 'text-amber-300 bg-amber-400/10 border-amber-300/20',
+  'text-editor': 'text-orange-300 bg-orange-400/10 border-orange-300/20',
   memory: 'text-blue-300 bg-blue-400/10 border-blue-300/20',
   'system-monitor': 'text-rose-300 bg-rose-400/10 border-rose-300/20',
   settings: 'text-zinc-300 bg-zinc-400/10 border-zinc-300/20',
@@ -244,13 +258,32 @@ export default function App() {
   const [selectedFileKeys, setSelectedFileKeys] = useState([]);
   const [fileClipboard, setFileClipboard] = useState(null);
   const [selectionBox, setSelectionBox] = useState(null);
-  const [filePreview, setFilePreview] = useState(null);
+  // ── Text Editor app ──────────────────────────────────────────────────────
+  // Open documents live here (not inside the window) so closing the editor
+  // window and reopening it keeps every tab, like a real desktop app.
+  const [editorTabs, setEditorTabs] = useState([]);
+  const [activeEditorTab, setActiveEditorTab] = useState(null);
+  // Changes whenever the Files app hands a file to the editor.
+  const [editorOpenRequest, setEditorOpenRequest] = useState(null);
+  const [renameTarget, setRenameTarget] = useState(null);
+  const [renameName, setRenameName] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [toast, setToast] = useState('');
-  
+
+  // Session lives in React state only — refreshing the page always returns to
+  // the AuthScreen, exactly as the requirements ask.
+  const [session, setSession] = useState(null);
+  const [shellPrompt, setShellPrompt] = useState('');
+  // Mirror of `session` for socket callbacks registered once, so a reconnect
+  // can re-load the signed-in user's filesystem without a stale closure.
+  const sessionRef = useRef(null);
+
   const overviewSearchRef = useRef(null);
   const terminalEndRef = useRef(null);
   const fileListRef = useRef(null);
+  // Set on login; the telemetry handler jumps the desktop into this user's
+  // /home/<user> folder the first time it appears, then clears itself.
+  const pendingHomeRef = useRef(null);
 
   // Time ticker
   useEffect(() => {
@@ -322,20 +355,21 @@ export default function App() {
         setFsDirectories(dirs);
         setFsFiles(files);
 
-        // Keep current directory if it still exists, otherwise navigate to home/root
-        setCurrentDirId((prevDirId) => {
-          if (dirs.some((d) => d.dirId === prevDirId)) return prevDirId;
-          const homeDir = dirs.find((d) => d.name === 'student' || d.name === 'nitw' || d.name === 'home');
-          return homeDir ? homeDir.dirId : 'D0';
-        });
-      }
-    });
+        // First telemetry after login: drop the desktop into the user's home
+        // folder and align the real shell with it, then never again.
+        if (pendingHomeRef.current) {
+          const homeName = pendingHomeRef.current;
+          const homeDir = dirs.find((d) => d.name === homeName);
+          if (homeDir) {
+            pendingHomeRef.current = null;
+            setSelectedFileKeys([]);
+            setCurrentDirId(homeDir.dirId);
+            socket.emit('cmd:set_cwd', { dirId: homeDir.dirId });
+          }
+        }
 
-    socket.on('file:read_result', (data) => {
-      if (data && data.ok) {
-        setFilePreview((prev) => (prev && prev.id === data.fileId ? { ...prev, draft: data.content ?? '' } : prev));
-      } else if (data && !data.ok) {
-        setToast(`File read failed for ${data.fileId}.`);
+        // Keep the current directory if it still exists, otherwise fall back to root.
+        setCurrentDirId((prevDirId) => (dirs.some((d) => d.dirId === prevDirId) ? prevDirId : 'D0'));
       }
     });
 
@@ -357,13 +391,80 @@ export default function App() {
     };
   }, [hiddenPIDs]);
 
+  // 🔌 VFS + real-shell bridge (registered once).
+  //
+  //  * `vfs:snapshot`  — the engine changed the filesystem; mirror the snapshot
+  //                      into IndexedDB as the browser's safety-net copy.
+  //  * `shell:result`  — output of a real CommandPrompt (or kernel) command.
+  //  * `cwd:result`    — the shell was re-pointed at a directory by the GUI.
+  //  * `connect`       — the backend (re)started: reload this user's filesystem
+  //                      from the server mirror so nothing on disk is lost.
+  useEffect(() => {
+    socket.on('vfs:snapshot', (data) => {
+      if (data && data.user && typeof data.snapshot === 'string' && data.snapshot) {
+        saveBrowserSnapshot(data.user, data.snapshot);
+      }
+    });
+
+    // A backend restart spawns a brand-new engine with an empty in-RAM
+    // filesystem. The backend restores the last active user by itself, but the
+    // desktop still has to re-sync (home folder, shell prompt, file listing),
+    // so re-issue the same load a login performs. The server mirror is
+    // authoritative; the browser copy is only consulted when it is newer.
+    const handleConnect = () => {
+      const current = sessionRef.current;
+      if (!current) return;
+      pendingHomeRef.current = normalizeUser(current.user);
+      loadBrowserSnapshotRecord(current.user)
+        .then((record) => {
+          socket.emit('vfs:load', {
+            user: current.user,
+            snapshot: record?.snapshot ?? null,
+            snapshotUpdatedAt: record?.updatedAt ?? null,
+          });
+        })
+        .catch(() => {
+          socket.emit('vfs:load', { user: current.user, snapshot: null, snapshotUpdatedAt: null });
+        });
+    };
+    socket.on('connect', handleConnect);
+
+    socket.on('shell:result', (data) => {
+      if (!data) return;
+      const rawOutput = String(data.output ?? '');
+
+      // `clear` (and the ANSI erase-display sequence) wipes the scrollback.
+      if ((data.command || '').trim().toLowerCase() === 'clear' || rawOutput.includes('\u001b[2J')) {
+        setTermHistory(['MINIOS shell 2.4.0', '']);
+      } else {
+        const cleaned = stripAnsi(rawOutput).replace(/\n+$/, '');
+        setTermHistory((previous) => (cleaned ? [...previous, cleaned, ''] : [...previous, '']));
+      }
+
+      // Keep the terminal and the file manager on the same directory.
+      if (data.cwdId) setCurrentDirId(data.cwdId);
+      if (data.prompt) setShellPrompt(stripAnsi(data.prompt).replace(/\s+$/, ' '));
+    });
+
+    socket.on('cwd:result', (data) => {
+      if (data && data.cwdId) setCurrentDirId(data.cwdId);
+    });
+
+    return () => {
+      socket.off('vfs:snapshot');
+      socket.off('connect', handleConnect);
+      socket.off('shell:result');
+      socket.off('cwd:result');
+    };
+  }, []);
+
   // Global Shortcuts
   useEffect(() => {
     const handleGlobalShortcut = (event) => {
       if (event.key === 'Escape') {
         setAppLauncherOpen(false); setQuickSettingsOpen(false); setContextMenu(null);
         setDockContextMenu(null); setDockTooltip(null); setSelectionBox(null);
-        setNewItemType(null); setFilePreview(null);
+        setNewItemType(null);
         return;
       }
       const target = event.target;
@@ -497,6 +598,27 @@ export default function App() {
   const currentFolderObj = fsDirectories.find((d) => d.dirId === currentDirId);
   const currentFolderLabel = currentFolderObj ? currentFolderObj.name : 'root';
   const isAtFileRoot = currentDirId === 'D0';
+
+  // Prompt shown in the terminal input row. The engine supplies the real shell
+  // prompt (with ANSI stripped); this fallback matches its shape until it does.
+  const promptText = shellPrompt || `${session?.user ?? 'user'}@minios:${currentPathDisplay}$ `;
+
+  // Clickable breadcrumb trail from root down to the current directory.
+  const breadcrumbTrail = useMemo(() => {
+    const map = new Map(fsDirectories.map((d) => [d.dirId, d]));
+    const trail = [];
+    let curr = currentDirId;
+    let guard = 0;
+    while (curr && guard < fsDirectories.length + 1) {
+      const dir = map.get(curr);
+      if (!dir) break;
+      trail.unshift({ id: dir.dirId, name: dir.dirId === 'D0' ? 'root' : dir.name });
+      if (!dir.parentDirId) break;
+      curr = dir.parentDirId;
+      guard++;
+    }
+    return trail.length ? trail : [{ id: 'D0', name: 'root' }];
+  }, [currentDirId, fsDirectories]);
   const dockApps = useMemo(() => INITIAL_APPS.filter((app) => app.id !== 'settings' && (pinnedApps.includes(app.id) || windows.some((win) => win.id === app.id && win.isOpen))), [pinnedApps, windows]);
 
   // Window Management functions
@@ -642,27 +764,38 @@ export default function App() {
   };
 
   // File Manager & Terminal Functions
+  // Navigates the GUI and aligns the real shell with the same directory.
+  const navigateToDir = (dirId) => {
+    setCurrentDirId(dirId);
+    setSelectedFileKeys([]);
+    socket.emit('cmd:set_cwd', { dirId });
+  };
+
   const goUpDirectory = () => {
     if (currentDirId === 'D0') return;
     const currentFolder = fsDirectories.find((d) => d.dirId === currentDirId);
-    if (currentFolder && currentFolder.parentDirId) {
-      setCurrentDirId(currentFolder.parentDirId);
-      setSelectedFileKeys([]);
-    }
+    if (currentFolder && currentFolder.parentDirId) navigateToDir(currentFolder.parentDirId);
+  };
+
+  // Hands a file to the Text Editor app (and brings its window forward).
+  const openFileInEditor = (file) => {
+    if (!file || file.type !== 'file') return;
+    setContextMenu(null);
+    setSelectedFileKeys([getFileKey(file)]);
+    editorRequestSeq += 1;
+    setEditorOpenRequest({ file, requestId: editorRequestSeq });
+    openWindow('text-editor');
   };
 
   const openFileEntry = (file) => {
     setContextMenu(null);
     setSelectedFileKeys([getFileKey(file)]);
     if (file.type === 'dir') {
-      setCurrentDirId(file.id);
-      setSelectedFileKeys([]);
+      navigateToDir(file.id);
       return;
     }
-    const ownerPID = file.ownerPID || 'USER';
-    socket.emit('cmd:file_open', { fileId: file.id, byPID: ownerPID });
-    socket.emit('cmd:file_read', { fileId: file.id, byPID: ownerPID });
-    setFilePreview({ ...file, draft: 'Loading content from simulated disk...' });
+    // Files open in the Text Editor app, which reads/writes through the engine.
+    openFileInEditor(file);
   };
   const openFileContextMenu = (event, entry = null) => {
     event.preventDefault(); event.stopPropagation();
@@ -793,138 +926,24 @@ export default function App() {
     reader.readAsDataURL(imageFile);
     event.target.value = '';
   };
+  // Echoes the real shell prompt plus the typed line, then hands it to the
+  // backend. Filesystem commands run through the real C++ CommandPrompt; kernel
+  // verbs (ps/mem/spawn/kill/step/run/pause/reset) are answered by the OS layer.
+  // The answer always comes back asynchronously as `shell:result`.
+  const runTerminalCommand = (command) => {
+    const line = String(command ?? '').trim();
+    if (!line) return;
+    setTermHistory((previous) => [...previous, `${promptText}${line}`]);
+    socket.emit('shell:exec', { command: line });
+  };
+
   const handleTerminalSubmit = (event) => {
     event.preventDefault();
-    const command = termInput.trim();
-    if (!command) return;
-    const args = command.split(/\s+/);
-    let output = `$ ${command}`;
-    switch (args[0]) {
-      case 'help': output += '\nCommands: help, clear, ps, ls, cd <folder|..>, mkdir <name>, touch <name>, top, mem, uname, date, pwd, spawn <name> <burst>, kill <pid>, step, run, pause, reset, tick'; break;
-      case 'clear': setTermHistory(['MINIOS shell 2.4.0', '']); setTermInput(''); return;
-      case 'ps': output += '\nPID  STATE      PRI  BURST  REMAIN  NAME\n' + processes.filter(p => !hiddenPIDs.has(p.pid)).map((p) => `${String(p.pid).padEnd(4)} ${p.state.padEnd(10)} ${String(p.priority).padEnd(4)} ${String(`${p.burst}u`).padEnd(6)} ${String(`${p.remaining}u`).padEnd(6)} ${p.name}`).join('\n'); break;
-      case 'ls':
-        output += '\n' + (visibleFiles.length ? visibleFiles.map((file) => `${file.type === 'dir' ? 'd' : '-'}  ${file.name}`).join('\n') : '(empty directory)');
-        break;
-      case 'top': output += `\nSimulated CPU activity: ${Math.min(96, 12 + activeProcesses * 11)}%\nRunnable processes: ${activeProcesses}\nTelemetry values are simulated, not host-machine measurements.`; break;
-      case 'mem': output += `\n[Contiguous Partitions]\nTotal RAM: ${memoryStats?.totalMemory || 100} MB | Allocated: ${memoryStats?.usedMemory || 0} MB | Free: ${memoryStats?.freeMemory || 100} MB\nExternal Fragmentation: ${Number(memoryStats?.externalFragmentation || 0).toFixed(1)}%\n[Paging Subsystem]\nTotal Frames: ${pagingStats?.totalFrames || 64} (${pagingStats?.pageSize || 4} KB/frame) | Free: ${pagingStats?.freeFrames ?? 64} | Used: ${pagingStats?.usedFrames ?? 0} | Faults: ${pagingStats?.pageFaults || 0} | Policy: ${pagingStats?.policy || 'LRU'}`; break;
-      case 'uname': output += '\nMINIOS 2.4.0 nitw-cse x86_64-simulated'; break;
-      case 'date': output += `\n${currentTime.toString()}`; break;
-      case 'pwd':
-        output += `\n${currentPathDisplay}`;
-        break;
-      case 'cd': {
-        const rawDest = (args[1] || '').trim();
-        const destination = rawDest.replace(/\/+$/, ''); // Strip trailing slash
-        if (!destination || destination === '~' || destination === '/') {
-          setCurrentDirId('D0');
-          output += '\nChanged directory to /';
-          break;
-        }
-        if (destination === '..') {
-          const currentFolder = fsDirectories.find((d) => d.dirId === currentDirId);
-          if (currentFolder && currentFolder.parentDirId) {
-            setCurrentDirId(currentFolder.parentDirId);
-            output += '\nChanged directory to ..';
-          } else {
-            output += '\nAlready at root /';
-          }
-          break;
-        }
-        const target = visibleFiles.find((f) => f.type === 'dir' && f.name === destination);
-        if (target) {
-          setCurrentDirId(target.id);
-          output += `\nChanged directory to ${destination}.`;
-        } else {
-          output += `\ncd: no such directory: ${rawDest}`;
-        }
-        break;
-      }
-
-      case 'mkdir': {
-        const name = args[1];
-        if (!name) { output += '\nUsage: mkdir <name>'; break; }
-        socket.emit('cmd:dir_create', { name, parentDirId: currentDirId });
-        output += `\nCreated folder ${name}.`;
-        break;
-      }
-      case 'touch': {
-        const name = args[1];
-        if (!name) { output += '\nUsage: touch <name>'; break; }
-        socket.emit('cmd:file_create', { ownerPID: 'USER', name, sizeInBlocks: 1, dirId: currentDirId });
-        output += `\nCreated file ${name}.`;
-        break;
-      }
-      case 'cat': {
-        const name = args[1];
-        if (!name) { output += '\nUsage: cat <filename>'; break; }
-        const target = visibleFiles.find((f) => f.type === 'file' && f.name === name);
-        if (!target) { output += `\ncat: ${name}: No such file`; break; }
-        openFileEntry(target);
-        output += `\nOpened ${name} in editor preview.`;
-        break;
-      }
-      case 'rm': {
-        const isR = args[1] === '-r' || args[1] === '-rf';
-        const name = isR ? args[2] : args[1];
-        if (!name) { output += '\nUsage: rm [-r] <name>'; break; }
-        const target = visibleFiles.find((f) => f.name === name);
-        if (!target) { output += `\nrm: cannot remove '${name}': No such file or directory`; break; }
-        if (target.type === 'dir' && !isR) { output += `\nrm: cannot remove '${name}': Is a directory (use -r)`; break; }
-        deleteItemRecursive(target);
-        output += `\nRemoved ${name}.`;
-        break;
-      }
-      case 'spawn': {
-        const name = args[1] || 'task_node';
-        const burst = Number.parseInt(args[2], 10) || 8;
-        const memory = Number.parseInt(args[3], 10) || 10;
-        const priority = Number.parseInt(args[4], 10) || 1;
-        if (burst < 1) { output += '\nBurst time must be at least 1.'; break; }
-        socket.emit('cmd:add_process', { name, burst, priority, arrival: 0, memory });
-        output += `\nSpawned ${name} (Burst: ${burst}u, Memory: ${memory} MB, Priority: ${priority}).`; break;
-      }
-      case 'kill': {
-        const pidStr = String(args[1]);
-        if (pidStr && pidStr !== 'undefined') {
-          socket.emit('cmd:kill_process', { pid: pidStr });
-          setHiddenPIDs(prev => new Set(prev).add(pidStr));
-          output += `\nSent kill signal for PID ${pidStr}.`;
-        } else output += '\nUsage: kill <existing-pid>';
-        break;
-      }
-      case 'step': {
-        socket.emit('cmd:step');
-        output += `\nAdvanced simulation clock by 1 tick. Current tick: ${currentTick + 1}`;
-        break;
-      }
-      case 'run': {
-        socket.emit('timer:start', { intervalMs: 1000 });
-        setIsClockRunning(true);
-        output += '\nSimulation clock started (1 tick/sec). Processes will run automatically.';
-        break;
-      }
-      case 'pause': {
-        socket.emit('timer:pause');
-        setIsClockRunning(false);
-        output += '\nSimulation clock paused.';
-        break;
-      }
-      case 'reset': {
-        socket.emit('cmd:reset');
-        setIsClockRunning(false);
-        output += '\nSimulation reset to Tick 0. All processes cleared.';
-        break;
-      }
-      case 'tick': {
-        output += `\nCurrent simulation tick: ${currentTick} (${isClockRunning ? 'running' : 'paused'})`;
-        break;
-      }
-      default: output += `\n${args[0]}: command not found. Type 'help' for commands.`;
-    }
-    setTermHistory((previous) => [...previous, output, '']);
+    if (!termInput.trim()) return;
+    runTerminalCommand(termInput);
     setTermInput('');
   };
+
   const createFileSystemItem = (event) => {
     event.preventDefault();
     const name = newItemName.trim();
@@ -944,26 +963,78 @@ export default function App() {
     setNewItemName('');
     setNewItemType(null);
   };
-  const saveFilePreview = () => {
-    if (!filePreview) return;
-    const ownerPID = filePreview.ownerPID || 'USER';
-    socket.emit('cmd:file_open', { fileId: filePreview.id, byPID: ownerPID });
-    socket.emit('cmd:file_write', {
-      fileId: filePreview.id,
-      byPID: ownerPID,
-      content: filePreview.draft || '',
-    });
-    socket.emit('cmd:file_close', { fileId: filePreview.id, byPID: ownerPID });
-    setFilePreview(null);
-    setToast(`Saved changes to ${filePreview.name}.`);
+  // ── Rename ──────────────────────────────────────────────────────────────
+  const beginRename = (entry) => {
+    if (!entry) return;
+    setContextMenu(null);
+    setRenameTarget(entry);
+    setRenameName(entry.name);
   };
 
-  const closeFilePreview = () => {
-    if (filePreview) {
-      const ownerPID = filePreview.ownerPID || 'USER';
-      socket.emit('cmd:file_close', { fileId: filePreview.id, byPID: ownerPID });
+  const submitRename = (event) => {
+    event.preventDefault();
+    if (!renameTarget) return;
+    const nextName = renameName.trim();
+    if (!nextName || nextName === renameTarget.name) {
+      setRenameTarget(null);
+      return;
     }
-    setFilePreview(null);
+    if (nextName === '.' || nextName === '..' || nextName.includes('/')) {
+      return setToast('Use a simple name without slashes.');
+    }
+    if (renameTarget.type === 'dir') {
+      socket.emit('cmd:dir_rename', { dirId: renameTarget.id, newName: nextName });
+    } else {
+      socket.emit('cmd:file_rename', { fileId: renameTarget.id, newName: nextName });
+    }
+    setToast(`Renamed to "${nextName}".`);
+    setRenameTarget(null);
+  };
+
+  // ── Session (login / logout) ────────────────────────────────────────────
+  // The backend prefers its own server mirror and falls back to the browser
+  // copy, so we simply hand it whichever snapshot we have — with its timestamp,
+  // so the newer of the two always wins. Jumping to the user's home folder is
+  // deferred until the matching telemetry arrives.
+  const handleAuthenticated = async (username, isNew) => {
+    let snapshot = null;
+    let snapshotUpdatedAt = null;
+    if (!isNew) {
+      try {
+        const record = await loadBrowserSnapshotRecord(username);
+        snapshot = record?.snapshot ?? null;
+        snapshotUpdatedAt = record?.updatedAt ?? null;
+      } catch {
+        snapshot = null; // browser mirror is only a fallback; never block login
+        snapshotUpdatedAt = null;
+      }
+    }
+    pendingHomeRef.current = normalizeUser(username);
+    socket.emit('vfs:load', { user: username, snapshot, snapshotUpdatedAt });
+    setCurrentDirId('D0');
+    setSelectedFileKeys([]);
+    setShellPrompt('');
+    setTermHistory(['MINIOS shell 2.4.0', `Signed in as ${username}.`, '']);
+    setSession({ user: username });
+    sessionRef.current = { user: username };
+  };
+
+  const handleLogout = () => {
+    pendingHomeRef.current = null;
+    setSession(null);
+    sessionRef.current = null;
+    setEditorTabs([]);
+    setActiveEditorTab(null);
+    setEditorOpenRequest(null);
+    setRenameTarget(null);
+    setShellPrompt('');
+    setCurrentDirId('D0');
+    setSelectedFileKeys([]);
+    setTermHistory(['MINIOS shell 2.4.0', 'Type help to see supported commands.', '']);
+    setWindows(INITIAL_WINDOWS);
+    setActiveWindow('process-manager');
+    socket.emit('timer:pause');
+    setIsClockRunning(false);
   };
   
   const deleteFile = (entry) => {
@@ -979,6 +1050,14 @@ export default function App() {
       const target = event.target;
       const editingText = target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
       if (editingText) return;
+
+      // F2 renames the single selected entry (matches the context-menu hint).
+      if (event.key === 'F2' && selectedFileKeys.length === 1) {
+        event.preventDefault();
+        beginRename(visibleFiles.find((item) => item.id === selectedFileKeys[0]));
+        return;
+      }
+
       if (!(event.ctrlKey || event.metaKey)) return;
       const key = event.key.toLowerCase();
       if (key === 'c' && selectedFileKeys.length) { event.preventDefault(); copyOrCutSelectedFiles('copy'); }
@@ -1004,6 +1083,12 @@ export default function App() {
   const fileSelectionStyle = selectionBox && fileSelectionBounds ? { left: Math.min(selectionBox.startX, selectionBox.currentX) - fileSelectionBounds.left, top: Math.min(selectionBox.startY, selectionBox.currentY) - fileSelectionBounds.top, width: Math.abs(selectionBox.currentX - selectionBox.startX), height: Math.abs(selectionBox.currentY - selectionBox.startY) } : null;
   const activeMaximizedWindow = windows.some((win) => win.isOpen && !win.isMinimized && win.isMaximized && win.id === activeWindow);
 
+  // Auth gate: the desktop is only reachable once an account is authenticated.
+  // Session state is in-memory only, so a refresh always lands back here.
+  if (!session) {
+    return <AuthScreen onAuthenticated={handleAuthenticated} />;
+  }
+
   return (
     <div className={`relative h-screen w-screen select-none overflow-hidden bg-gradient-to-br ${themeClass} font-sans text-slate-200`} style={wallpaperImage ? { backgroundImage: `linear-gradient(rgba(7, 10, 18, .38), rgba(7, 10, 18, .52)), url("${wallpaperImage}")`, backgroundSize: 'cover', backgroundPosition: 'center', backgroundRepeat: 'no-repeat' } : undefined}>
       
@@ -1020,6 +1105,14 @@ export default function App() {
         <span className="text-xs font-semibold tabular-nums text-white">{currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
         <ChevronDown className={`h-3 w-3 text-slate-300/80 transition-transform ${quickSettingsOpen ? 'rotate-180' : ''}`} />
       </button>}
+
+      {!draggingWin && !activeMaximizedWindow && (
+        <div className="absolute right-3 top-3 z-[90] flex items-center gap-2 rounded-full border border-white/[0.22] bg-slate-950/[0.42] py-1 pl-1 pr-1.5 text-slate-100 shadow-[0_10px_40px_rgba(0,0,0,0.24)] ring-1 ring-white/[0.04] backdrop-blur-2xl">
+          <span className="flex h-6 w-6 items-center justify-center rounded-full border border-white/[0.16] bg-white/[0.1] text-[10px] font-semibold uppercase text-slate-100">{session.user.slice(0, 1)}</span>
+          <span className="max-w-[140px] truncate text-xs font-medium text-slate-200">{session.user}</span>
+          <button onClick={handleLogout} title="Sign out" aria-label="Sign out" className="rounded-full p-1.5 text-slate-400 transition hover:bg-rose-500/15 hover:text-rose-200"><LogOut className="h-3.5 w-3.5" /></button>
+        </div>
+      )}
 
       <aside style={dockInlineStyle} className={`absolute z-[80] flex items-center rounded-[22px] border border-white/[0.2] bg-gradient-to-br from-white/[0.19] via-white/[0.085] to-slate-950/[0.28] shadow-[0_24px_70px_rgba(0,0,0,0.3)] ring-1 ring-black/20 backdrop-blur-2xl ${dockPositionClass}`}>
         <button onClick={() => openWindow('settings')} aria-label="Settings" onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }} onMouseEnter={(event) => showDockTooltip(event, 'Settings')} onMouseLeave={() => setDockTooltip(null)} className={`${dockIconSize} ${isBottomDock ? 'mr-1' : 'mb-3'} flex shrink-0 items-center justify-center rounded-xl border border-white/[0.13] bg-white/[0.075] text-slate-100 shadow-sm transition duration-200 ease-out hover:-translate-y-1 hover:scale-105 hover:bg-white/[0.15] hover:shadow-lg`}>
@@ -1068,6 +1161,7 @@ export default function App() {
                 <Icon className={`h-4 w-4 shrink-0 ${APP_TONES[win.id]?.split(' ')[0] || 'text-slate-300'}`} strokeWidth={1.8} />
                 <span className="truncate text-xs font-semibold text-slate-200">{win.title}</span>
                 {win.id === 'terminal' && <span className="rounded border border-white/[0.08] px-1.5 py-0.5 text-[9px] text-slate-500">bash-like</span>}
+                {win.id === 'text-editor' && editorTabs.length > 0 && <span className="rounded border border-white/[0.08] px-1.5 py-0.5 text-[9px] text-slate-500">{editorTabs.length} tab{editorTabs.length === 1 ? '' : 's'}</span>}
               </div>
               <div className="ml-3 flex shrink-0 items-center gap-1">
                 <button onClick={(event) => toggleMinimize(win.id, event)} title="Minimize" className="rounded-md p-1.5 text-slate-500 transition hover:bg-white/[0.08] hover:text-slate-200"><Minimize2 className="h-3.5 w-3.5" /></button>
@@ -1076,7 +1170,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className={`min-h-0 flex-1 ${win.id === 'terminal' ? 'overflow-hidden p-3' : 'overflow-auto p-5'}`}>
+            <div className={`min-h-0 flex-1 ${win.id === 'terminal' ? 'overflow-hidden p-3' : win.id === 'text-editor' ? 'overflow-hidden p-0' : 'overflow-auto p-5'}`}>
               {win.id === 'process-manager' && (
                 <div>
                   <SectionHeading 
@@ -1226,7 +1320,7 @@ export default function App() {
                   <div className="min-h-0 flex-1 overflow-y-auto p-4 leading-relaxed text-emerald-100/90">
                     {termHistory.map((line, index) => <pre key={index} className="whitespace-pre-wrap break-words font-mono">{line || ' '}</pre>)}
                     <form onSubmit={handleTerminalSubmit} className="flex items-baseline gap-2 font-mono leading-relaxed">
-                      <span className="shrink-0 text-sky-300">student@minios:{currentPathDisplay}$</span>
+                      <span className="shrink-0 whitespace-pre text-sky-300">{promptText}</span>
                       <input autoComplete="off" spellCheck={false} value={termInput} onChange={(e) => setTermInput(e.target.value)} aria-label="Terminal command" className="min-w-0 flex-1 border-0 bg-transparent p-0 font-mono text-[11px] text-slate-100 outline-none ring-0 focus:border-0 focus:outline-none focus:ring-0" placeholder="" />
                     </form>
                     <div ref={terminalEndRef} />
@@ -1242,10 +1336,17 @@ export default function App() {
                   </div>
                   <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-white/[0.09] bg-white/[0.045] px-3 py-2.5 backdrop-blur-xl">
                     <button onClick={goUpDirectory} disabled={isAtFileRoot} className="rounded-md p-1.5 text-slate-300 transition hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-30" title="Go to parent folder"><ArrowUp className="h-3.5 w-3.5" /></button>
-                    <Folder className="h-4 w-4 text-amber-200" />
+                    <Folder className="h-4 w-4 shrink-0 text-amber-200" />
                     <span className="text-[11px] text-slate-400">Location</span>
-                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-200">{currentPathDisplay}</span>
-                    <button onClick={() => setCurrentDirId('D0')} className="rounded-md px-2 py-1 text-[10px] text-slate-400 transition hover:bg-white/[0.07] hover:text-slate-100" title="Return to root directory">Root (/)</button>
+                    <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden font-mono text-[11px]">
+                      {breadcrumbTrail.map((node, index) => (
+                        <span key={node.id} className="flex min-w-0 items-center gap-0.5">
+                          {index > 0 && <ChevronRight className="h-3 w-3 shrink-0 text-slate-500" />}
+                          <button type="button" onClick={() => navigateToDir(node.id)} title={node.name} className={`truncate rounded px-1.5 py-0.5 transition hover:bg-white/[0.09] ${index === breadcrumbTrail.length - 1 ? 'text-slate-100' : 'text-slate-400 hover:text-slate-100'}`}>{node.name}</button>
+                        </span>
+                      ))}
+                    </div>
+                    <button onClick={() => navigateToDir('D0')} className="rounded-md px-2 py-1 text-[10px] text-slate-400 transition hover:bg-white/[0.07] hover:text-slate-100" title="Return to root directory">Root (/)</button>
                   </div>
                   <div ref={fileListRef} className="relative min-h-[250px] overflow-x-auto rounded-xl border border-white/[0.09] bg-black/[0.08]" onMouseDown={beginFileSelection} onContextMenu={(event) => openFileContextMenu(event)}>
                     <table className="w-full min-w-[620px] text-left text-xs">
@@ -1268,6 +1369,19 @@ export default function App() {
                     {fileSelectionStyle && <div aria-hidden="true" className="pointer-events-none absolute z-20 border border-sky-200/70 bg-sky-300/15" style={fileSelectionStyle} />}
                   </div>
                 </div>
+              )}
+
+              {win.id === 'text-editor' && (
+                <TextEditor
+                  tabs={editorTabs}
+                  setTabs={setEditorTabs}
+                  activeTabKey={activeEditorTab}
+                  setActiveTabKey={setActiveEditorTab}
+                  files={fsFiles}
+                  directories={fsDirectories}
+                  openRequest={editorOpenRequest}
+                  onNotify={(message) => setToast(message)}
+                />
               )}
 
               {win.id === 'memory' && (
@@ -1787,6 +1901,14 @@ export default function App() {
             <div className="my-1 h-px bg-white/[0.09]" />
             <button onClick={() => copyOrCutSelectedFiles('copy')} className="w-full rounded-lg px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/[0.09]">Copy <span className="float-right text-[10px] text-slate-500">Ctrl+C</span></button>
             <button onClick={() => copyOrCutSelectedFiles('cut')} className="w-full rounded-lg px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/[0.09]">Cut <span className="float-right text-[10px] text-slate-500">Ctrl+X</span></button>
+            {contextMenu.selectedKeys.length === 1 && (() => {
+              const entry = visibleFiles.find((item) => item.id === contextMenu.selectedKeys[0]);
+              if (!entry) return null;
+              return <>
+                {entry.type === 'file' && <button onClick={() => { setContextMenu(null); openFileEntry(entry); }} className="w-full rounded-lg px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/[0.09]">Open</button>}
+                <button onClick={() => beginRename(entry)} className="w-full rounded-lg px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/[0.09]">Rename <span className="float-right text-[10px] text-slate-500">F2</span></button>
+              </>;
+            })()}
             <button onClick={deleteSelectedFiles} className="w-full rounded-lg px-3 py-2 text-left text-xs text-rose-200 transition hover:bg-rose-400/[0.1]">Delete selected</button>
           </>}
           {fileClipboard && <>
@@ -1820,13 +1942,13 @@ export default function App() {
         </div>
       )}
 
-      {filePreview && (
-        <div className="absolute inset-0 z-[126] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-          <div className="flex max-h-[82vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-white/[0.16] bg-[#1b2028]/[0.98] shadow-[0_24px_80px_rgba(0,0,0,0.5)]">
-            <div className="flex items-center justify-between border-b border-white/[0.09] px-4 py-3"><div className="flex min-w-0 items-center gap-2.5"><FileText className="h-4 w-4 shrink-0 text-sky-200" /><div className="min-w-0"><p className="truncate text-xs font-semibold text-slate-100">{filePreview.name}</p><p className="mt-0.5 truncate text-[10px] text-slate-500">ID: {filePreview.id} · Owner: {filePreview.ownerPID || 'USER'} · Backed by engine/data/disk.img</p></div></div><button onClick={closeFilePreview} aria-label="Close file" className="rounded-md p-1.5 text-slate-400 transition hover:bg-white/[0.08] hover:text-white"><X className="h-4 w-4" /></button></div>
-            <textarea value={filePreview.draft} onChange={(event) => setFilePreview((previous) => ({ ...previous, draft: event.target.value }))} spellCheck={false} className="min-h-[280px] flex-1 resize-y bg-[#0d1117] p-4 font-mono text-xs leading-relaxed text-slate-200 outline-none placeholder:text-slate-600" placeholder="This file is empty. Start typing…" />
-            <div className="flex items-center justify-between gap-3 border-t border-white/[0.08] px-4 py-3"><span className="text-[10px] text-slate-500">Changes are stored in the browser simulation only.</span><div className="flex gap-2"><button onClick={closeFilePreview} className="rounded-lg border border-white/[0.1] px-3.5 py-2 text-xs text-slate-300 hover:bg-white/[0.06]">Cancel</button><button onClick={saveFilePreview} className="rounded-lg bg-slate-100 px-4 py-2 text-xs font-semibold text-slate-900 hover:bg-white">Save changes</button></div></div>
-          </div>
+      {renameTarget && (
+        <div className="absolute inset-0 z-[127] flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm">
+          <form onSubmit={submitRename} className="w-full max-w-sm rounded-2xl border border-white/[0.16] bg-[#202630]/95 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.5)] backdrop-blur-2xl">
+            <div className="mb-4 flex items-center gap-3"><span className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/[0.1] bg-white/[0.07]"><Pencil className="h-5 w-5 text-sky-200" /></span><div className="min-w-0"><h3 className="text-sm font-semibold text-white">Rename {renameTarget.type === 'dir' ? 'folder' : 'file'}</h3><p className="mt-1 truncate text-[10px] text-slate-400">{renameTarget.name}</p></div></div>
+            <label className="mb-4 block"><span className="mb-1.5 block text-[10px] text-slate-400">New name</span><input autoFocus value={renameName} onChange={(event) => setRenameName(event.target.value)} className="field w-full" /></label>
+            <div className="flex justify-end gap-2"><button type="button" onClick={() => setRenameTarget(null)} className="rounded-lg border border-white/[0.1] px-3.5 py-2 text-xs text-slate-300 transition hover:bg-white/[0.06]">Cancel</button><button type="submit" className="rounded-lg bg-slate-100 px-4 py-2 text-xs font-semibold text-slate-900 transition hover:bg-white">Rename</button></div>
+          </form>
         </div>
       )}
 
@@ -1836,19 +1958,12 @@ export default function App() {
           <div className="grid grid-cols-2 gap-2"><div className="rounded-lg border border-white/[0.07] bg-white/[0.035] p-3"><Wifi className="mb-2 h-4 w-4 text-slate-300" /><p className="text-xs text-slate-200">Network</p><p className="mt-1 text-[10px] text-slate-500">Connected · simulated</p></div><div className="rounded-lg border border-white/[0.07] bg-white/[0.035] p-3"><Battery className="mb-2 h-4 w-4 text-slate-300" /><p className="text-xs text-slate-200">Power</p><p className="mt-1 text-[10px] text-slate-500">Normal · simulated</p></div></div>
           <button onClick={() => openWindow('settings')} className="mt-3 flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs text-slate-200 transition hover:bg-white/[0.08]"><Settings className="h-4 w-4 text-slate-300" />Open Settings</button>
           <button onClick={() => { setWindows((previous) => previous.map((win) => win.isOpen ? { ...win, isMinimized: true } : win)); setActiveWindow('desktop'); setQuickSettingsOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs text-slate-200 transition hover:bg-white/[0.08]"><Power className="h-4 w-4 text-slate-300" />Show desktop</button>
+          <button onClick={() => { setQuickSettingsOpen(false); handleLogout(); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs text-rose-200 transition hover:bg-rose-500/[0.12]"><LogOut className="h-4 w-4 text-rose-300" />Sign out</button>
         </div>
       )}
 
       {toast && <div className="absolute bottom-5 left-1/2 z-[120] -translate-x-1/2 rounded-lg border border-white/[0.1] bg-[#283243]/90 px-4 py-2.5 text-xs text-slate-100 shadow-xl backdrop-blur-2xl">{toast}</div>}
 
-      <style>{`
-        .field { border: 1px solid rgba(255,255,255,.13); border-radius: 9px; background: rgba(5,7,10,.48); padding: 9px 11px; color: #f1f5f9; font-size: 11px; outline: none; transition: border-color .15s, background .15s; }
-        .field::placeholder { color: #64748b; }
-        .field:focus { border-color: rgba(186,230,253,.55); background: rgba(5,7,10,.66); }
-        .field option { background: #171a1f; color: #e2e8f0; }
-        * { scrollbar-width: thin; scrollbar-color: rgba(203,213,225,.30) transparent; }
-        button { -webkit-tap-highlight-color: transparent; }
-      `}</style>
     </div>
   );
 }

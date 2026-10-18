@@ -127,6 +127,19 @@ public:
     // appendFile: adds content to the end of the existing file content
     bool appendFile(const std::string& fileId, const std::string& byPID, const std::string& content, int currentTick);
 
+    // "Editor save": writes `content` into an existing file, using the file's
+    // own owner identity and tolerating stale open-table entries (the desktop
+    // editor is not a simulated process, so it must not deadlock against a file
+    // another PID left open). The file is left closed. Returns false when the
+    // file does not exist or the simulated disk cannot hold the new content.
+    bool saveFile(const std::string& fileId, const std::string& content, int currentTick);
+
+    // "Editor read": returns a file's content using the file's own owner
+    // identity, tolerating stale open-table entries (a file left open by a
+    // simulated process must not block the desktop editor). The file is left
+    // closed. Sets ok=false when the file does not exist.
+    std::string readFileForEditor(const std::string& fileId, int currentTick, bool& ok);
+
     // Called on process termination — closes and deletes all files owned by this PID
     void handleProcessTermination(const std::string& pid);
 
@@ -140,4 +153,18 @@ public:
     bool renameFile(const std::string& fileId, const std::string& newName);
 
     std::string getSnapshotAsJson() const;
+
+    // ── Persistence ─────────────────────────────────────────────────────
+    // serialize() produces a self-contained, line-oriented textual snapshot of
+    // the complete filesystem: every directory, every file, and the file
+    // contents held in the disk blocks. main.cpp base64-encodes this so it can
+    // travel over the line-based stdin/stdout protocol (and be mirrored into
+    // browser storage by the Node backend).
+    //
+    // restoreFromSerialized() discards the current contents and rebuilds the
+    // tree from such a snapshot, preserving dirIds/fileIds, names and content.
+    // It returns false and fills `error` when the payload is malformed or the
+    // snapshot cannot be represented (e.g. disk too small).
+    std::string serialize() const;
+    bool restoreFromSerialized(const std::string& snapshot, std::string& error);
 };

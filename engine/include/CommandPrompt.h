@@ -19,6 +19,9 @@ private:
     std::vector<std::string> commandHistory;
     FileSystem* fs;
 
+    // Track whether default directories have been initialized for this user
+    bool defaultDirsInitialized;
+
     std::vector<std::string> splitCommand(const std::string& cmd);
 
     // Resolves a path typed by the user (absolute "/x/y", home-relative "~/x", or relative "x/y", including "." and "..") starting from currentDirId. Returns "" if any component along the way doesn't exist as a directory. 
@@ -67,15 +70,41 @@ public:
     CommandPrompt(const std::string& user, const std::string& host, FileSystem* fileSystem);
     ~CommandPrompt();
 
+    // Re-resolves /home/<username> and points the shell at it. Called after
+    // the filesystem is restored from a snapshot (dirIds are preserved, but the
+    // shell's cached homeDirId must be re-read). Returns false if the home
+    // directory could not be resolved, in which case the shell sits at root.
+    bool attachHome();
+
+    // Creates the standard MiniOS user folders (Desktop, Documents, Downloads,
+    // Music, Pictures, Videos) under the home directory. Idempotent: existing
+    // folders and their contents are left untouched. Only called when a brand
+    // new user filesystem is created. Uses consistent folder names:
+    // Desktop, Documents, Downloads, Music, Pictures, Videos.
+    void initializeDefaultDirectories();
+
+    // Self-heal for a restored snapshot. If the user's home directory is
+    // completely empty (nothing but the home folder itself survived), the
+    // standard folders are recreated so the account still has a usable
+    // workspace. A home that holds *anything* — folders or files the user
+    // created or deliberately kept — is left exactly as it is, so a pruned
+    // folder never comes back.
+    void ensureUsableHomeContents();
+
     // Frontend linking interface
     std::string executeCommand(const std::string& cmd);
     std::string getPrompt() const;
     void printPrompt();
     std::string getCurrentPath() const;     // display path, e.g. "~/Documents"
     std::string getCurrentDirId() const;    // real dirId, e.g. "D4"
+    std::string getHomeDirId() const;       // real dirId of the user's home
     std::string getUsername() const;
     std::string getHostname() const;
     const std::vector<std::string>& getCommandHistory() const;
+
+    // Points the shell at an existing directory id. Used by the desktop file
+    // manager so terminal output and the GUI stay on the same location.
+    bool setCurrentDirId(const std::string& dirId);
 
     // Used by Kernel for commands handled outside the basic file-system shell.
     void recordExternalCommand(const std::string& command)

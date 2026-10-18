@@ -13,6 +13,26 @@
 CommandPrompt::CommandPrompt(const std::string& user, const std::string& host, FileSystem* fileSystem)
     : username(user), hostname(host), fs(fileSystem)
 {
+    attachHome();
+}
+
+CommandPrompt::~CommandPrompt() {}
+
+// ============================================================
+// HOME DIRECTORY ATTACHMENT & DEFAULT FILESYSTEM INITIALIZATION
+// ============================================================
+//
+// This constructor intentionally does NOT populate default folders or sample
+// files: the filesystem may be a user's restored state, and re-seeding it on
+// every construction is exactly how "defaults reappear after a logout/my files
+// vanished" bugs happen. Default folders are created once, by
+// initializeDefaultDirectories(), only when a brand new user filesystem is set
+// up (see main.cpp FS_LOAD).
+
+bool CommandPrompt::attachHome()
+{
+    if (username.empty()) return false;
+
     std::string rootId = fs->getRootDirId();
 
     // 1. Ensure /home exists under root (D0)
@@ -30,14 +50,20 @@ CommandPrompt::CommandPrompt(const std::string& user, const std::string& host, F
     // Fall back to root if home creation failed
     if (homeDirId.empty()) {
         homeDirId = rootId;
+        currentDirId = homeDirId;
+        return false;
     }
 
     currentDirId = homeDirId;
+    return true;
+}
 
-    // 3. Populate default standard user directories under ~/
-    std::vector<std::string> defaultDirs = {
-        "Desktop", "Documents", "Downloads", "Music", "Pictures", 
-        "Public", "Templates", "Videos", "linux-lab", "snap"
+void CommandPrompt::initializeDefaultDirectories()
+{
+    // The standard MiniOS user folders. Created on demand only — each one is
+    // skipped when it already exists, so existing content is never touched.
+    const std::vector<std::string> defaultDirs = {
+        "Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos"
     };
 
     for (const auto& dir : defaultDirs) {
@@ -45,36 +71,22 @@ CommandPrompt::CommandPrompt(const std::string& user, const std::string& host, F
             fs->createDirectory(dir, homeDirId, 0);
         }
     }
-
-    // 4. Ensure ~/linux-lab/notes exists
-    std::string linuxLabId = fs->findChildDirectoryIdByName(homeDirId, "linux-lab");
-    if (!linuxLabId.empty()) {
-        if (fs->findChildDirectoryIdByName(linuxLabId, "notes").empty()) {
-            fs->createDirectory("notes", linuxLabId, 0);
-        }
-    }
-
-    // 5. Populate initial demo files in ~/Downloads
-    std::string downloadsId = fs->findChildDirectoryIdByName(homeDirId, "Downloads");
-    if (!downloadsId.empty()) {
-        if (fs->findChildFileByName(downloadsId, "Computer Organization and Architecture.pdf").fileId.empty()) {
-            std::string f1 = fs->createFile("SYSTEM", "Computer Organization and Architecture.pdf", 1, 0, downloadsId);
-            if (!f1.empty()) writeFileContent(f1, "SYSTEM", "%PDF-1.4\n1 0 obj\n<< /Title (COA Notes) >>\nendobj\n");
-        }
-
-        if (fs->findChildFileByName(downloadsId, "code_1.140.0-1790759618_amd64.deb").fileId.empty()) {
-            std::string f2 = fs->createFile("SYSTEM", "code_1.140.0-1790759618_amd64.deb", 1, 0, downloadsId);
-            if (!f2.empty()) writeFileContent(f2, "SYSTEM", "!<arch>\ndebian-binary   1580000000  0     0     100644  4         `\n2.0\n");
-        }
-
-        if (fs->findChildFileByName(downloadsId, "java-swing-concepts.pdf").fileId.empty()) {
-            std::string f3 = fs->createFile("SYSTEM", "java-swing-concepts.pdf", 1, 0, downloadsId);
-            if (!f3.empty()) writeFileContent(f3, "SYSTEM", "Java Swing Concepts:\n- JFrame\n- JPanel\n- JButton\n");
-        }
-    }
 }
 
-CommandPrompt::~CommandPrompt() {}
+void CommandPrompt::ensureUsableHomeContents()
+{
+    if (homeDirId.empty()) return;
+
+    // Anything at all inside home means the account holds real (possibly
+    // pruned) content — leave it exactly as it is, so a folder the user
+    // deleted never comes back.
+    if (!fs->getChildDirectories(homeDirId).empty()) return;
+    if (!fs->getChildFiles(homeDirId).empty()) return;
+
+    // An empty home directory can only be the remains of a wiped filesystem,
+    // so give the account its standard folders back.
+    initializeDefaultDirectories();
+}
 
 // ============================================================
 // PATH RESOLUTION & NAVIGATION HELPERS
@@ -983,6 +995,21 @@ std::string CommandPrompt::getCurrentPath() const
 std::string CommandPrompt::getCurrentDirId() const
 {
     return currentDirId;
+}
+
+std::string CommandPrompt::getHomeDirId() const
+{
+    return homeDirId;
+}
+
+bool CommandPrompt::setCurrentDirId(const std::string& dirId)
+{
+    if (dirId.empty() || !fs->directoryExists(dirId)) {
+        return false;
+    }
+
+    currentDirId = dirId;
+    return true;
 }
 
 std::string CommandPrompt::getUsername() const

@@ -1,11 +1,102 @@
-import { sendCommand } from '../engine/processManager.js';
+import { sendCommand, loadUser, getActiveUser } from '../engine/processManager.js';
 import { startAutoStep, stopAutoStep } from './simulationClock.js';
+import { handleKernelCommand, isKernelCommand } from '../engine/shellBridge.js';
 
 export function registerSocketEvents(io) {
     io.on('connection', (socket) => {
         console.log(`[Socket.io] Client connected: ${socket.id}`);
 
         sendCommand("STATE");
+
+        // ── Persistent virtual filesystem ────────────────────────────────────
+        // data: { user, snapshot?, snapshotUpdatedAt? }
+        // Loads <user>'s filesystem into the engine (server mirror first, then
+        // the browser's uploaded copy when it is the newer one, else a fresh
+        // default tree). The engine replies with an FS_EXPORT, relayed back as
+        // the `vfs:snapshot` event.
+        socket.on('vfs:load', (data) => {
+            if (!data || !data.user) {
+                socket.emit('vfs:load_error', { message: 'A username is required.' });
+                return;
+            }
+            try {
+                const result = loadUser(
+                    data.user,
+                    data.snapshot ?? null,
+                    data.snapshotUpdatedAt ?? null
+                );
+                socket.emit('vfs:loaded', result);
+            } catch (err) {
+                socket.emit('vfs:load_error', { message: err.message });
+            }
+        });
+
+        // ── Real command prompt ──────────────────────────────────────────────
+        // data: { command }
+        // Kernel verbs (ps/mem/spawn/kill/step/run/...) are answered by the
+        // backend immediately; every other command is executed by the C++
+        // CommandPrompt via `SHELL <base64>` and returns a `shell:result`.
+        socket.on('shell:exec', (data) => {
+            if (!data) return;
+            const command = String(data.command ?? '');
+            if (!command.trim()) return;
+
+            if (isKernelCommand(command)) {
+                const result = handleKernelCommand(command);
+                if (result.handled) {
+                    socket.emit('shell:result', {
+                        command,
+                        output: result.output ?? '',
+                        cwdId: null,
+                        cwd: null,
+                        prompt: null,
+                        kernel: true
+                    });
+                    return;
+                }
+            }
+
+            const b64 = Buffer.from(command, 'utf-8').toString('base64');
+            sendCommand(`SHELL ${b64}`);
+        });
+
+        // ── Keep the shell and the GUI on the same directory ─────────────────
+        // data: { dirId }
+        socket.on('cmd:set_cwd', (data) => {
+            if (!data) return;
+            const safeDirId = String(data.dirId ?? '').replace(/[^a-zA-Z0-9_-]/g, '');
+            if (safeDirId) {
+                sendCommand(`CWD ${safeDirId}`);
+            }
+        });
+
+        // ── Editor file access ───────────────────────────────────────────────
+        // data: { fileId } — lenient read (owner-agnostic); the engine answers
+        // with a READ_RESULT carrying pid "EDITOR", relayed as file:read_result.
+        socket.on('cmd:file_content', (data) => {
+            if (!data) return;
+            const safeFileId = String(data.fileId ?? '').replace(/[^a-zA-Z0-9_-]/g, '');
+            if (safeFileId) {
+                sendCommand(`FILE_CONTENT ${safeFileId}`);
+            }
+        });
+
+        // data: { requestId, fileId, content } — robust save acknowledged with
+        // a FILE_SAVE_RESULT (relayed as file:save_result).
+        socket.on('cmd:file_save', (data) => {
+            if (!data) return;
+            const safeRequestId = String(data.requestId ?? '').replace(/[^a-zA-Z0-9_-]/g, '');
+            const safeFileId = String(data.fileId ?? '').replace(/[^a-zA-Z0-9_-]/g, '');
+            const b64Content = Buffer.from(String(data.content ?? ''), 'utf-8').toString('base64');
+            if (safeRequestId && safeFileId) {
+                sendCommand(`FILE_SAVE ${safeRequestId} ${safeFileId} ${b64Content}`);
+            }
+        });
+
+        // Report which user's filesystem is currently loaded (if any).
+        socket.on('vfs:active', () => {
+            socket.emit('vfs:active', { user: getActiveUser() });
+        });
 
         // ── Simulation controls ───────────────────────────────────────────────
         socket.on('cmd:step', () => sendCommand("STEP"));

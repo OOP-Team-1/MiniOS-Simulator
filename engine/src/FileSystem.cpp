@@ -1,8 +1,10 @@
 #include "../include/FileSystem.h"
+#include "../include/SerializationUtils.h"
 
 #include <sstream>
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 const std::string FileSystem::ROOT_DIR_ID = "D0";
 
@@ -592,6 +594,58 @@ bool FileSystem::appendFile(const std::string& fileId, const std::string& byPID,
     return writeFile(fileId, byPID, combined, currentTick);
 }
 
+bool FileSystem::saveFile(const std::string& fileId, const std::string& content, int currentTick)
+{
+    File* file = findFile(fileId);
+    if (!file) return false;
+
+    // The desktop editor is not a simulated process, so it must not deadlock
+    // against a stale open-table entry left behind by a PID that no longer
+    // holds the file. Drop every entry for this file and clear the open flag.
+    openFileTable.erase(
+        std::remove_if(openFileTable.begin(), openFileTable.end(),
+            [&](const OpenFileEntry& e) { return e.fileId == fileId; }),
+        openFileTable.end()
+    );
+    file->setOpen(false);
+
+    // Act as the file's own owner (falling back to USER for legacy entries
+    // restored from a snapshot without an owner).
+    const std::string owner = file->getOwnerPID().empty() ? "USER" : file->getOwnerPID();
+
+    if (!openFile(fileId, owner, currentTick)) return false;
+
+    bool ok = writeFile(fileId, owner, content, currentTick);
+
+    closeFile(fileId, owner);
+    return ok;
+}
+
+std::string FileSystem::readFileForEditor(const std::string& fileId, int currentTick, bool& ok)
+{
+    ok = false;
+
+    File* file = findFile(fileId);
+    if (!file) return "";
+
+    // Tolerate stale open-table entries, exactly like saveFile().
+    openFileTable.erase(
+        std::remove_if(openFileTable.begin(), openFileTable.end(),
+            [&](const OpenFileEntry& e) { return e.fileId == fileId; }),
+        openFileTable.end()
+    );
+    file->setOpen(false);
+
+    const std::string owner = file->getOwnerPID().empty() ? "USER" : file->getOwnerPID();
+
+    if (!openFile(fileId, owner, currentTick)) return "";
+
+    std::string content = readFile(fileId, owner, currentTick, ok);
+
+    closeFile(fileId, owner);
+    return content;
+}
+
 // ============================================================
 // PROCESS / SYSTEM
 // ============================================================
@@ -736,7 +790,7 @@ std::string FileSystem::getSnapshotAsJson() const
         const auto& d = directories[i];
         ss << "{";
         ss << "\"dirId\":\"" << d->getDirId() << "\",";
-        ss << "\"name\":\"" << d->getName() << "\",";
+        ss << "\"name\":\"" << minios::jsonEscape(d->getName()) << "\",";
         ss << "\"parentDirId\":\"" << d->getParentDirId() << "\",";
         ss << "\"createdAt\":" << d->getCreatedAt();
         ss << "}";
@@ -751,10 +805,10 @@ std::string FileSystem::getSnapshotAsJson() const
         const auto& f = files[i];
         ss << "{";
         ss << "\"fileId\":\"" << f->getFileId() << "\",";
-        ss << "\"name\":\"" << f->getName() << "\",";
-        ss << "\"ownerPID\":\"" << f->getOwnerPID() << "\",";
+        ss << "\"name\":\"" << minios::jsonEscape(f->getName()) << "\",";
+        ss << "\"ownerPID\":\"" << minios::jsonEscape(f->getOwnerPID()) << "\",";
         ss << "\"dirId\":\"" << f->getDirId() << "\",";
-        ss << "\"sizeInBlocks\":" << f->getSizeInBlocks() << ",";
+        ss << "\"sizeInBlocks\":" << f->getAllocatedBlocks().size() << ",";
         ss << "\"sizeInBytes\":" << f->getSizeInBytes() << ",";
         ss << "\"isOpen\":" << (f->isOpen() ? "true" : "false") << ",";
         ss << "\"createdAt\":" << f->getCreatedAt() << ",";
@@ -778,7 +832,7 @@ std::string FileSystem::getSnapshotAsJson() const
         const auto& e = openFileTable[i];
         ss << "{";
         ss << "\"fileId\":\"" << e.fileId << "\",";
-        ss << "\"pid\":\"" << e.pid << "\",";
+        ss << "\"pid\":\"" << minios::jsonEscape(e.pid) << "\",";
         ss << "\"openedAtTick\":" << e.openedAtTick;
         ss << "}";
         if (i + 1 < openFileTable.size()) ss << ",";
@@ -786,4 +840,288 @@ std::string FileSystem::getSnapshotAsJson() const
     ss << "]}";
 
     return ss.str();
+}
+
+// ============================================================
+// PERSISTENCE — TEXT SNAPSHOTS
+// ============================================================
+//
+// The virtual filesystem lives in RAM (plus raw bytes in engine/data/disk.img),
+// so an engine restart would otherwise lose every directory/file entry. The
+// format below is a complete, self-describing dump that the Node backend mirrors
+// into persistent storage and feeds back through restoreFromSerialized():
+//
+//   MINIOS_VFS 1
+//   D <dirId> <parentDirId|-> <createdAt> <nameBase64>
+//   F <fileId> <dirId> <createdAt> <ownerPIDBase64> <nameBase64> <contentBase64|->
+//
+// Base64 keeps names and contents on a single line, so '\n' inside a text file
+// can never be mistaken for a record separator.
+
+std::string FileSystem::serialize() const
+{
+    std::ostringstream ss;
+    ss << "MINIOS_VFS 1\n";
+
+    for (const auto& d : directories)
+    {
+        ss << "D " << d->getDirId() << " "
+           << (d->getParentDirId().empty() ? "-" : d->getParentDirId()) << " "
+           << d->getCreatedAt() << " "
+           << minios::base64Encode(d->getName()) << "\n";
+    }
+
+    for (const auto& f : files)
+    {
+        // Read the stored bytes straight back off the simulated disk.
+        std::string content;
+        for (int blockId : f->getAllocatedBlocks())
+        {
+            std::vector<char> raw = disk->readBlock(blockId);
+            content.append(raw.data(), raw.size());
+        }
+        if (static_cast<int>(content.size()) > f->getSizeInBytes())
+        {
+            content.resize(static_cast<std::size_t>(f->getSizeInBytes()));
+        }
+
+        ss << "F " << f->getFileId() << " "
+           << f->getDirId() << " "
+           << f->getCreatedAt() << " "
+           << minios::base64Encode(f->getOwnerPID()) << " "
+           << minios::base64Encode(f->getName()) << " "
+           << (content.empty() ? "-" : minios::base64Encode(content)) << "\n";
+    }
+
+    return ss.str();
+}
+
+bool FileSystem::restoreFromSerialized(const std::string& snapshot, std::string& error)
+{
+    error.clear();
+
+    // ---- Phase 1: parse everything before touching live state, so a malformed
+    // ---- payload can never leave the filesystem half-destroyed.
+    struct DirRecord
+    {
+        std::string id;
+        std::string parentId;
+        std::string name;
+        int createdAt{ 0 };
+    };
+
+    struct FileRecord
+    {
+        std::string id;
+        std::string dirId;
+        std::string ownerPID;
+        std::string name;
+        std::string content;
+        int createdAt{ 0 };
+    };
+
+    std::vector<DirRecord> dirRecords;
+    std::vector<FileRecord> fileRecords;
+
+    std::istringstream input(snapshot);
+    std::string line;
+    bool headerSeen = false;
+    int lineNumber = 0;
+
+    while (std::getline(input, line))
+    {
+        lineNumber++;
+
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+
+        std::istringstream reader(line);
+        std::string kind;
+        reader >> kind;
+
+        if (!headerSeen)
+        {
+            if (kind != "MINIOS_VFS")
+            {
+                error = "not a MiniOS filesystem snapshot";
+                return false;
+            }
+
+            std::string version;
+            reader >> version;
+            if (version != "1")
+            {
+                error = "unsupported snapshot version: " + version;
+                return false;
+            }
+
+            headerSeen = true;
+            continue;
+        }
+
+        if (kind == "D")
+        {
+            DirRecord record;
+            std::string parent;
+            std::string nameB64;
+
+            if (!(reader >> record.id >> parent >> record.createdAt >> nameB64))
+            {
+                error = "malformed directory record on line " + std::to_string(lineNumber);
+                return false;
+            }
+
+            record.parentId = (parent == "-") ? "" : parent;
+            record.name = minios::base64Decode(nameB64);
+            dirRecords.push_back(record);
+        }
+        else if (kind == "F")
+        {
+            FileRecord record;
+            std::string ownerB64;
+            std::string nameB64;
+            std::string contentB64;
+
+            if (!(reader >> record.id >> record.dirId >> record.createdAt >> ownerB64 >> nameB64 >> contentB64))
+            {
+                error = "malformed file record on line " + std::to_string(lineNumber);
+                return false;
+            }
+
+            record.ownerPID = minios::base64Decode(ownerB64);
+            record.name = minios::base64Decode(nameB64);
+            record.content = (contentB64 == "-") ? "" : minios::base64Decode(contentB64);
+            fileRecords.push_back(record);
+        }
+        else
+        {
+            error = "unknown record type '" + kind + "' on line " + std::to_string(lineNumber);
+            return false;
+        }
+    }
+
+    if (!headerSeen)
+    {
+        error = "empty snapshot";
+        return false;
+    }
+
+    // ---- Phase 2: rebuild. reset() keeps only the permanent root (D0).
+    reset();
+
+    const auto bumpCounter = [](const std::string& id, char prefix, int& counter)
+    {
+        if (id.size() < 2 || id[0] != prefix) return;
+        try
+        {
+            int value = std::stoi(id.substr(1));
+            if (value >= counter) counter = value + 1;
+        }
+        catch (...) { /* ids that aren't <prefix><number> simply don't advance the counter */ }
+    };
+
+    // The root directory is already present after reset(); its serialized "D0"
+    // row is intentionally skipped. Creation order guarantees parents exist
+    // before their children (FileSystem::createDirectory enforces that).
+    for (const auto& record : dirRecords)
+    {
+        if (record.id.empty())
+        {
+            error = "directory record with empty id";
+            return false;
+        }
+
+        if (record.id == ROOT_DIR_ID) continue;
+        if (findDirectory(record.id))
+        {
+            error = "duplicate directory id " + record.id;
+            return false;
+        }
+
+        if (record.parentId.empty())
+        {
+            error = "directory " + record.id + " has no parent";
+            return false;
+        }
+
+        if (!findDirectory(record.parentId))
+        {
+            error = "directory " + record.id + " references missing parent " + record.parentId;
+            return false;
+        }
+
+        directories.push_back(
+            std::make_unique<Directory>(record.id, record.name, record.parentId, record.createdAt)
+        );
+
+        bumpCounter(record.id, 'D', nextDirId);
+    }
+
+    for (const auto& record : fileRecords)
+    {
+        if (record.id.empty())
+        {
+            error = "file record with empty id";
+            return false;
+        }
+
+        if (findFile(record.id))
+        {
+            error = "duplicate file id " + record.id;
+            return false;
+        }
+
+        std::string targetDirId = record.dirId.empty() ? ROOT_DIR_ID : record.dirId;
+        if (!findDirectory(targetDirId))
+        {
+            error = "file " + record.id + " references missing directory " + targetDirId;
+            return false;
+        }
+
+        int blocksNeeded = static_cast<int>(
+            (record.content.size() + static_cast<std::size_t>(blockSize) - 1) / static_cast<std::size_t>(blockSize)
+        );
+        if (blocksNeeded <= 0) blocksNeeded = 1;
+
+        std::vector<int> chosen = strategy->findBlocks(blocks, blocksNeeded);
+        if (static_cast<int>(chosen.size()) < blocksNeeded)
+        {
+            error = "disk too small to restore file '" + record.name + "'";
+            return false;
+        }
+
+        std::size_t blockIndex = 0;
+
+        for (int blockId : chosen)
+        {
+            blocks[blockId].allocate(record.id);
+
+            std::size_t offset = static_cast<std::size_t>(blockIndex) * static_cast<std::size_t>(blockSize);
+            blockIndex++;
+
+            std::size_t remaining = record.content.size() > offset ? record.content.size() - offset : 0;
+            std::size_t chunkLength = remaining < static_cast<std::size_t>(blockSize)
+                ? remaining
+                : static_cast<std::size_t>(blockSize);
+
+            std::vector<char> chunk(record.content.begin() + offset, record.content.begin() + offset + chunkLength);
+            disk->writeBlock(blockId, chunk);
+        }
+
+        auto file = std::make_unique<File>(
+            record.id,
+            record.name,
+            record.ownerPID.empty() ? "USER" : record.ownerPID,
+            targetDirId,
+            blocksNeeded,
+            chosen,
+            record.createdAt
+        );
+        file->setSizeInBytes(static_cast<int>(record.content.size()));
+        files.push_back(std::move(file));
+
+        bumpCounter(record.id, 'F', nextFileId);
+    }
+
+    return true;
 }

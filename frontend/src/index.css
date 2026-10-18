@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+   Global desktop chrome.
+   These were previously inlined via a <style> block / the Tailwind CDN script;
+   they now live in the real stylesheet so the production build ships them.
+--------------------------------------------------------------------------- */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: #030712; /* gray-950, matches the pre-CSS body class */
+  color: #f3f4f6;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Shared form-control look used across the simulator windows. */
+.field {
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 9px;
+  background: rgba(5, 7, 10, 0.48);
+  padding: 9px 11px;
+  color: #f1f5f9;
+  font-size: 11px;
+  outline: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+.field::placeholder {
+  color: #64748b;
+}
+.field:focus {
+  border-color: rgba(186, 230, 253, 0.55);
+  background: rgba(5, 7, 10, 0.66);
+}
+.field option {
+  background: #171a1f;
+  color: #e2e8f0;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(203, 213, 225, 0.3) transparent;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
