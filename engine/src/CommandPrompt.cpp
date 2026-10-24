@@ -689,18 +689,16 @@ std::string CommandPrompt::executeWrite(const std::string& fullCmd) {
     if (args.size() < 2) {
         return "write: missing file operand\nUsage: write <filename> <content>\n";
     }
-    std::string target = args[1];
+    std::string target = stripQuotes(args[1]);
     std::string content = "";
     if (args.size() >= 3) {
-        size_t pos = fullCmd.find(target);
-        if (pos != std::string::npos) {
-            pos += target.length();
-            content = fullCmd.substr(pos);
-            size_t s = content.find_first_not_of(" \t");
-            if (s != std::string::npos) content = content.substr(s);
-            content = stripQuotes(content);
-            content = processEscapes(content);
+        // Join all tokens after the filename, preserving spaces
+        for (size_t i = 2; i < args.size(); ++i) {
+            if (i > 2) content += " ";
+            content += args[i];
         }
+        // If user wants raw escapes processed, do it
+        content = processEscapes(content);
     }
     bool ok = writeToFileOrPath(target, content, false);
     if (!ok) {
@@ -714,18 +712,14 @@ std::string CommandPrompt::executeAppend(const std::string& fullCmd) {
     if (args.size() < 2) {
         return "append: missing file operand\nUsage: append <filename> <content>\n";
     }
-    std::string target = args[1];
+    std::string target = stripQuotes(args[1]);
     std::string content = "";
     if (args.size() >= 3) {
-        size_t pos = fullCmd.find(target);
-        if (pos != std::string::npos) {
-            pos += target.length();
-            content = fullCmd.substr(pos);
-            size_t s = content.find_first_not_of(" \t");
-            if (s != std::string::npos) content = content.substr(s);
-            content = stripQuotes(content);
-            content = processEscapes(content);
+        for (size_t i = 2; i < args.size(); ++i) {
+            if (i > 2) content += " ";
+            content += args[i];
         }
+        content = processEscapes(content);
     }
     bool ok = writeToFileOrPath(target, content, true);
     if (!ok) {

@@ -122,6 +122,11 @@ export default function TextEditor({
           timers.delete(tab.key);
         }
         if (result.ok) {
+          // If the user has unsaved changes in this tab, don't clobber them.
+          // Only auto-sync when the editor is clean.
+          if (tab.draft !== tab.savedContent && !tab.loading) {
+            return { ...tab, loading: false, error: '' };
+          }
           return { ...tab, draft: result.content ?? '', savedContent: result.content ?? '', loading: false, error: '' };
         }
         return { ...tab, loading: false, error: 'The engine could not read this file.' };
@@ -136,6 +141,23 @@ export default function TextEditor({
     loadTimersRef.current.forEach((timer) => clearTimeout(timer));
     loadTimersRef.current.clear();
   }, []);
+
+  // Auto-refresh when terminal/shell modifies files
+  useEffect(() => {
+    const handleSnapshot = () => {
+      const currentTabs = tabsRef.current;
+      currentTabs.forEach((tab) => {
+        // Only auto-reload if the user hasn't made unsaved edits
+        if (tab.draft === tab.savedContent && !tab.loading && !tab.saving) {
+          armLoadTimeout(tab.key);
+          patchTab(tab.key, { loading: true, error: '' });
+          socket.emit('cmd:file_content', { fileId: tab.fileId });
+        }
+      });
+    };
+    socket.on('vfs:snapshot', handleSnapshot);
+    return () => socket.off('vfs:snapshot', handleSnapshot);
+  }, [armLoadTimeout, patchTab]);
 
   // ── Opening documents ─────────────────────────────────────────────────────
   // A tab's key is the file's id: one document per file, and opening the same

@@ -52,14 +52,15 @@ export default function AuthScreen({ onAuthenticated }) {
     };
 
     return (
-        <div className="relative flex h-screen w-screen items-center justify-center overflow-hidden bg-gradient-to-br from-[#1d3b57] via-[#2f3f6b] to-[#4a3566] px-4 text-slate-200">
-            <div className="pointer-events-none absolute inset-0 opacity-40" aria-hidden="true">
-                <div className="absolute -right-40 -top-44 h-[34rem] w-[34rem] rounded-full border border-white/[0.06]" />
-                <div className="absolute -right-20 -top-24 h-[26rem] w-[26rem] rounded-full border border-white/[0.05]" />
-                <div className="absolute bottom-[-19rem] left-[20%] h-[38rem] w-[38rem] rounded-full border border-white/[0.05]" />
+        <div className="relative flex h-screen w-screen items-center justify-center overflow-hidden px-4 text-slate-200" style={{ backgroundImage: 'url(/login-bg.jpg)', backgroundSize: 'cover', backgroundPosition: 'center' }}>
+            <div className="absolute inset-0 bg-gradient-to-br from-black/60 via-black/40 to-black/70" />
+            <div className="pointer-events-none absolute inset-0 opacity-30" aria-hidden="true">
+                <div className="absolute -right-40 -top-44 h-[34rem] w-[34rem] rounded-full border border-white/[0.08]" />
+                <div className="absolute -right-20 -top-24 h-[26rem] w-[26rem] rounded-full border border-white/[0.06]" />
+                <div className="absolute bottom-[-19rem] left-[20%] h-[38rem] w-[38rem] rounded-full border border-white/[0.06]" />
             </div>
 
-            <div className="relative z-10 w-full max-w-md rounded-2xl border border-white/[0.16] bg-slate-950/[0.42] p-7 shadow-[0_30px_90px_rgba(0,0,0,0.45)] ring-1 ring-white/[0.05] backdrop-blur-2xl">
+            <div className="relative z-10 w-full max-w-md rounded-2xl border border-white/[0.18] bg-white/[0.08] p-7 shadow-[0_40px_120px_rgba(0,0,0,0.6)] ring-1 ring-white/[0.1] backdrop-blur-xl">
                 <div className="mb-6 flex items-center gap-3">
                     <span className="flex h-11 w-11 items-center justify-center rounded-xl border border-white/[0.14] bg-white/[0.08] text-sky-200">
                         <Monitor className="h-6 w-6" strokeWidth={1.7} />
@@ -70,14 +71,14 @@ export default function AuthScreen({ onAuthenticated }) {
                     </div>
                 </div>
 
-                <div className="mb-5 inline-flex w-full rounded-lg border border-white/[0.1] bg-black/25 p-0.5">
+                <div className="mb-5 inline-flex w-full rounded-lg border border-white/[0.15] bg-white/[0.06] p-0.5 backdrop-blur-sm">
                     {['login', 'register'].map((option) => (
                         <button
                             key={option}
                             type="button"
                             onClick={() => { setMode(option); setError(''); }}
                             className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition ${
-                                mode === option ? 'bg-white/[0.12] text-white' : 'text-slate-400 hover:text-slate-200'
+                                mode === option ? 'bg-white/[0.18] text-white shadow-inner' : 'text-slate-300 hover:text-white'
                             }`}
                         >
                             {option === 'login' ? 'Sign in' : 'Create account'}
@@ -111,8 +112,8 @@ export default function AuthScreen({ onAuthenticated }) {
 
                 <form onSubmit={submit} className="space-y-4">
                     <label className="block">
-                        <span className="mb-1.5 block text-[10px] font-medium uppercase tracking-[0.12em] text-slate-400">Username</span>
-                        <div className="flex items-center gap-2 rounded-lg border border-white/[0.12] bg-black/30 px-3 focus-within:border-sky-300/50">
+                        <span className="mb-1.5 block text-[10px] font-medium uppercase tracking-[0.12em] text-slate-300">Username</span>
+                        <div className="flex items-center gap-2 rounded-lg border border-white/[0.18] bg-white/[0.06] px-3 backdrop-blur-sm focus-within:border-sky-300/60 focus-within:bg-white/[0.1]">
                             <User className="h-4 w-4 shrink-0 text-slate-400" />
                             <input
                                 autoFocus
@@ -126,8 +127,8 @@ export default function AuthScreen({ onAuthenticated }) {
                     </label>
 
                     <label className="block">
-                        <span className="mb-1.5 block text-[10px] font-medium uppercase tracking-[0.12em] text-slate-400">Password</span>
-                        <div className="flex items-center gap-2 rounded-lg border border-white/[0.12] bg-black/30 px-3 focus-within:border-sky-300/50">
+                        <span className="mb-1.5 block text-[10px] font-medium uppercase tracking-[0.12em] text-slate-300">Password</span>
+                        <div className="flex items-center gap-2 rounded-lg border border-white/[0.18] bg-white/[0.06] px-3 backdrop-blur-sm focus-within:border-sky-300/60 focus-within:bg-white/[0.1]">
                             <Lock className="h-4 w-4 shrink-0 text-slate-400" />
                             <input
                                 type="password"
@@ -142,8 +143,8 @@ export default function AuthScreen({ onAuthenticated }) {
 
                     {mode === 'register' && (
                         <label className="block">
-                            <span className="mb-1.5 block text-[10px] font-medium uppercase tracking-[0.12em] text-slate-400">Confirm password</span>
-                            <div className="flex items-center gap-2 rounded-lg border border-white/[0.12] bg-black/30 px-3 focus-within:border-sky-300/50">
+                            <span className="mb-1.5 block text-[10px] font-medium uppercase tracking-[0.12em] text-slate-300">Confirm password</span>
+                            <div className="flex items-center gap-2 rounded-lg border border-white/[0.18] bg-white/[0.06] px-3 backdrop-blur-sm focus-within:border-sky-300/60 focus-within:bg-white/[0.1]">
                                 <ShieldCheck className="h-4 w-4 shrink-0 text-slate-400" />
                                 <input
                                     type="password"
@@ -167,7 +168,7 @@ export default function AuthScreen({ onAuthenticated }) {
                     <button
                         type="submit"
                         disabled={busy}
-                        className="flex w-full items-center justify-center gap-2 rounded-lg bg-slate-100 px-4 py-2.5 text-sm font-semibold text-slate-900 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
+                        className="flex w-full items-center justify-center gap-2 rounded-lg bg-white/90 px-4 py-2.5 text-sm font-semibold text-slate-900 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
                     >
                         {busy ? 'Working…' : mode === 'register' ? (<><UserPlus className="h-4 w-4" /> Create & sign in</>) : (<><ArrowRight className="h-4 w-4" /> Sign in</>)}
                     </button>

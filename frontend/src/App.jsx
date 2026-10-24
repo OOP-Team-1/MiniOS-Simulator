@@ -203,8 +203,8 @@ function StatCard({ label, value, helper, icon: Icon }) {
 
 export default function App() {
   const [theme, setTheme] = useState('ocean');
-  const [wallpaperImage, setWallpaperImage] = useState('');
-  const [wallpaperName, setWallpaperName] = useState('');
+  const [wallpaperImage, setWallpaperImage] = useState('/wallpaper.jpg');
+  const [wallpaperName, setWallpaperName] = useState('pexels-hakantahmaz-6015200.jpg');
   const [iconSize, setIconSize] = useState('md');
   const [dockPosition, setDockPosition] = useState('left');
   const [pinnedApps, setPinnedApps] = useState(() => INITIAL_APPS.filter((app) => app.id !== 'settings').map((app) => app.id));
@@ -1098,7 +1098,7 @@ export default function App() {
         <div className="absolute bottom-[-19rem] left-[28%] h-[38rem] w-[38rem] rounded-full border border-white/[0.04]" />
       </div>
 
-      {!draggingWin && !activeMaximizedWindow && <button onClick={() => { setQuickSettingsOpen((open) => !open); setAppLauncherOpen(false); setDockContextMenu(null); setContextMenu(null); }} aria-label="Open system menu" className="absolute left-1/2 top-3 z-[90] flex -translate-x-1/2 items-center gap-3 rounded-full border border-white/[0.22] bg-slate-950/[0.42] px-4 py-2 text-slate-100 shadow-[0_10px_40px_rgba(0,0,0,0.24)] ring-1 ring-white/[0.04] backdrop-blur-2xl transition hover:bg-slate-950/[0.58]">
+      {!draggingWin && !activeMaximizedWindow && <button onClick={() => { setQuickSettingsOpen((open) => !open); setAppLauncherOpen(false); setDockContextMenu(null); setContextMenu(null); }} aria-label="Open system menu" className="absolute left-1/2 top-3 z-[190] flex -translate-x-1/2 items-center gap-3 rounded-full border border-white/[0.22] bg-slate-950/[0.42] px-4 py-2 text-slate-100 shadow-[0_10px_40px_rgba(0,0,0,0.24)] ring-1 ring-white/[0.04] backdrop-blur-2xl transition hover:bg-slate-950/[0.58]">
         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-300/90 shadow-[0_0_8px_rgba(110,231,183,0.28)]" />
         <span className="text-[10px] font-medium text-slate-300">{currentTime.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}</span>
         <span className="h-3 w-px bg-white/[0.16]" />
@@ -1107,7 +1107,7 @@ export default function App() {
       </button>}
 
       {!draggingWin && !activeMaximizedWindow && (
-        <div className="absolute right-3 top-3 z-[90] flex items-center gap-2 rounded-full border border-white/[0.22] bg-slate-950/[0.42] py-1 pl-1 pr-1.5 text-slate-100 shadow-[0_10px_40px_rgba(0,0,0,0.24)] ring-1 ring-white/[0.04] backdrop-blur-2xl">
+        <div className="absolute right-3 top-3 z-[190] flex items-center gap-2 rounded-full border border-white/[0.22] bg-slate-950/[0.42] py-1 pl-1 pr-1.5 text-slate-100 shadow-[0_10px_40px_rgba(0,0,0,0.24)] ring-1 ring-white/[0.04] backdrop-blur-2xl">
           <span className="flex h-6 w-6 items-center justify-center rounded-full border border-white/[0.16] bg-white/[0.1] text-[10px] font-semibold uppercase text-slate-100">{session.user.slice(0, 1)}</span>
           <span className="max-w-[140px] truncate text-xs font-medium text-slate-200">{session.user}</span>
           <button onClick={handleLogout} title="Sign out" aria-label="Sign out" className="rounded-full p-1.5 text-slate-400 transition hover:bg-rose-500/15 hover:text-rose-200"><LogOut className="h-3.5 w-3.5" /></button>
@@ -1187,6 +1187,17 @@ export default function App() {
                           <span className={`ml-1.5 inline-block h-2 w-2 rounded-full ${isClockRunning ? 'animate-pulse bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : 'bg-slate-500'}`} />
                           <span className="text-[10px] text-slate-400">{isClockRunning ? 'Running' : 'Paused'}</span>
                         </div>
+                        {(() => {
+                          const runningProc = processes.find(p => p.state === 'RUNNING' && !hiddenPIDs.has(p.pid));
+                          if (runningProc) {
+                            return <span className="rounded-md border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] text-emerald-300"><span className="text-emerald-400">CPU:</span> {runningProc.name} ({runningProc.pid})</span>;
+                          }
+                          const readyProcs = processes.filter(p => p.state === 'READY' && !hiddenPIDs.has(p.pid));
+                          if (readyProcs.length) {
+                            return <span className="rounded-md border border-amber-400/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300"><span className="text-amber-400">Next:</span> {readyProcs[0].name} ({readyProcs[0].pid})</span>;
+                          }
+                          return <span className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-[11px] text-slate-500">CPU: Idle</span>;
+                        })()}
                         <button 
                           onClick={stepSimulation} 
                           title="Advance simulation clock by 1 tick" 
@@ -1289,7 +1300,17 @@ export default function App() {
 
               {win.id === 'scheduler' && (
                 <div>
-                  <SectionHeading eyebrow="Kernel / CPU" title="Scheduling laboratory" description="Compare scheduling policies using the active simulated processes." icon={Activity} />
+                  <SectionHeading eyebrow="Kernel / CPU" title="Scheduling laboratory" description="Compare scheduling policies using the active simulated processes." icon={Activity} action={(() => {
+                    const runningProc = processes.find(p => p.state === 'RUNNING' && !hiddenPIDs.has(p.pid));
+                    if (runningProc) {
+                      return <span className="rounded-md border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] text-emerald-300"><span className="text-emerald-400">Current CPU:</span> {runningProc.name} ({runningProc.pid})</span>;
+                    }
+                    const readyProcs = processes.filter(p => p.state === 'READY' && !hiddenPIDs.has(p.pid));
+                    if (readyProcs.length) {
+                      return <span className="rounded-md border border-amber-400/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300"><span className="text-amber-400">Next CPU:</span> {readyProcs[0].name} ({readyProcs[0].pid})</span>;
+                    }
+                    return <span className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-[11px] text-slate-500">CPU: Idle</span>;
+                  })()} />
                   <div className="mb-5 flex flex-wrap items-end gap-3 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
                     <label className="min-w-[220px] flex-1"><span className="mb-1.5 block text-[10px] text-slate-500">Scheduling algorithm</span><select value={schedAlgo} onChange={(e) => setSchedAlgo(e.target.value)} className="field w-full"><option value="FCFS">First Come, First Served (FCFS)</option><option value="SJF">Shortest Job First (SJF)</option><option value="RR">Round Robin (RR)</option><option value="PRIORITY">Priority (lower number first)</option></select></label>
                     {schedAlgo === 'RR' && <label className="w-28"><span className="mb-1.5 block text-[10px] text-slate-500">Time quantum</span><input type="number" min="1" value={timeQuantum} onChange={(e) => setTimeQuantum(Number(e.target.value))} className="field w-full" /></label>}
@@ -1849,7 +1870,7 @@ export default function App() {
                       </div>
                       <p className="mt-3 text-[10px] leading-5 text-slate-500">Images apply to this browser session and are not uploaded to a server.</p>
                     </section>
-                    <section className="flex items-center justify-between gap-4 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4"><div><h3 className="text-xs font-semibold text-slate-200">About MINIOS</h3><p className="mt-1 text-[11px] text-slate-500">Desktop operating-system simulator · NIT Warangal CSE project</p></div><span className="rounded-md border border-white/[0.08] px-2.5 py-1.5 font-mono text-[10px] text-slate-400">v2.4.0</span></section>
+                    <section className="flex items-center justify-between gap-4 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4"><div><h3 className="text-xs font-semibold text-slate-200">About MINIOS</h3><p className="mt-1 text-[11px] text-slate-500">Desktop operating-system simulator ·</p></div><span className="rounded-md border border-white/[0.08] px-2.5 py-1.5 font-mono text-[10px] text-slate-400">v1.0.0</span></section>
                   </div>
                 </div>
               )}
@@ -1859,7 +1880,7 @@ export default function App() {
       })}
 
       {appLauncherOpen && (
-        <div className="absolute inset-0 z-[100] overflow-y-auto bg-[#111827]/62 backdrop-blur-2xl" onMouseDown={(event) => { if (event.target === event.currentTarget) setAppLauncherOpen(false); }}>
+        <div className="absolute inset-0 z-[210] overflow-y-auto bg-[#111827]/62 backdrop-blur-2xl" onMouseDown={(event) => { if (event.target === event.currentTarget) setAppLauncherOpen(false); }}>
           <div className="mx-auto flex min-h-full w-full max-w-6xl flex-col px-6 pb-10 pt-7 sm:px-10">
             <div className="mb-6 flex items-start justify-between gap-4">
               <div><p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-sky-200/80">MINIOS overview</p><h2 className="mt-1 text-xl font-semibold tracking-tight text-white">What would you like to open?</h2><p className="mt-1 text-xs text-slate-300/75">Search applications or jump back to an open window.</p></div>
@@ -1894,7 +1915,7 @@ export default function App() {
       )}
 
       {contextMenu && (
-        <div className="fixed z-[115] w-52 overflow-visible rounded-xl border border-white/[0.15] bg-[#242a34]/95 p-1.5 shadow-[0_18px_60px_rgba(0,0,0,0.45)] backdrop-blur-2xl" style={{ left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 220)), top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 310)) }} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+        <div className="fixed z-[200] w-52 overflow-visible rounded-xl border border-white/[0.15] bg-[#242a34]/95 p-1.5 shadow-[0_18px_60px_rgba(0,0,0,0.45)] backdrop-blur-2xl" style={{ left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 220)), top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 310)) }} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
           <button onClick={() => setContextNewOpen((open) => !open)} className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs text-slate-100 transition hover:bg-white/[0.09]"><span><Plus className="mr-2 inline h-3.5 w-3.5" />New</span><ChevronDown className={`h-3.5 w-3.5 -rotate-90 transition ${contextNewOpen ? 'rotate-0' : ''}`} /></button>
           {contextNewOpen && <div className="mb-1 ml-2 border-l border-white/[0.12] pl-2"><button onClick={() => beginCreateItem('dir')} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/[0.09]"><FolderPlus className="h-3.5 w-3.5 text-amber-200" />Folder</button><button onClick={() => beginCreateItem('file')} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/[0.09]"><FilePlus className="h-3.5 w-3.5 text-sky-200" />File</button></div>}
           {contextMenu.selectedKeys?.length > 0 && <>
@@ -1923,17 +1944,17 @@ export default function App() {
       {dockContextMenu && (() => {
         const pinned = pinnedApps.includes(dockContextMenu.appId);
         const app = INITIAL_APPS.find((item) => item.id === dockContextMenu.appId);
-        return <div className="fixed z-[118] w-48 rounded-xl border border-white/[0.15] bg-[#242a34]/95 p-1.5 shadow-[0_18px_60px_rgba(0,0,0,0.45)] backdrop-blur-2xl" style={{ left: Math.max(8, Math.min(dockContextMenu.x, window.innerWidth - 205)), top: Math.max(8, Math.min(dockContextMenu.y, window.innerHeight - 120)) }} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+        return <div className="fixed z-[200] w-48 rounded-xl border border-white/[0.15] bg-[#242a34]/95 p-1.5 shadow-[0_18px_60px_rgba(0,0,0,0.45)] backdrop-blur-2xl" style={{ left: Math.max(8, Math.min(dockContextMenu.x, window.innerWidth - 205)), top: Math.max(8, Math.min(dockContextMenu.y, window.innerHeight - 120)) }} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
           <div className="px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">{app?.title || 'Application'}</div>
           <button onClick={() => togglePinnedApp(dockContextMenu.appId)} className="w-full rounded-lg px-3 py-2.5 text-left text-xs text-slate-100 transition hover:bg-white/[0.09]">{pinned ? 'Unpin from dock' : 'Pin to dock'}</button>
           {!pinned && windows.some((win) => win.id === dockContextMenu.appId && win.isOpen) && <button onClick={() => { setWindows((previous) => previous.map((win) => win.id === dockContextMenu.appId ? { ...win, isOpen: false, isMinimized: false } : win)); setDockContextMenu(null); setToast('Application window closed.'); }} className="w-full rounded-lg px-3 py-2 text-left text-xs text-slate-300 transition hover:bg-white/[0.09]">Close window</button>}
         </div>;
       })()}
 
-      {dockTooltip && !dockContextMenu && !contextMenu && <div className="pointer-events-none fixed z-[130] whitespace-nowrap rounded-md border border-white/15 bg-[#11151d]/95 px-2.5 py-1.5 text-[11px] text-white shadow-xl backdrop-blur-xl" style={{ left: dockTooltip.x, top: dockTooltip.y, transform: dockTooltip.placement === 'top' ? 'translate(-50%, -100%)' : dockTooltip.placement === 'left' ? 'translate(-100%, -50%)' : 'translateY(-50%)' }}>{dockTooltip.title}</div>}
+      {dockTooltip && !dockContextMenu && !contextMenu && <div className="pointer-events-none fixed z-[200] whitespace-nowrap rounded-md border border-white/15 bg-[#11151d]/95 px-2.5 py-1.5 text-[11px] text-white shadow-xl backdrop-blur-xl" style={{ left: dockTooltip.x, top: dockTooltip.y, transform: dockTooltip.placement === 'top' ? 'translate(-50%, -100%)' : dockTooltip.placement === 'left' ? 'translate(-100%, -50%)' : 'translateY(-50%)' }}>{dockTooltip.title}</div>}
 
       {newItemType && (
-        <div className="absolute inset-0 z-[125] flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm">
+        <div className="absolute inset-0 z-[200] flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm">
           <form onSubmit={createFileSystemItem} className="w-full max-w-sm rounded-2xl border border-white/[0.16] bg-[#202630]/95 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.5)] backdrop-blur-2xl">
             <div className="mb-4 flex items-center gap-3"><span className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/[0.1] bg-white/[0.07]">{newItemType === 'dir' ? <FolderPlus className="h-5 w-5 text-amber-200" /> : <FilePlus className="h-5 w-5 text-sky-200" />}</span><div><h3 className="text-sm font-semibold text-white">Create {newItemType === 'dir' ? 'folder' : 'file'}</h3><p className="mt-1 text-[10px] text-slate-400">Inside {currentFolderLabel}</p></div></div>
             <label className="mb-4 block"><span className="mb-1.5 block text-[10px] text-slate-400">Name</span><input autoFocus value={newItemName} onChange={(event) => setNewItemName(event.target.value)} placeholder={newItemType === 'dir' ? 'e.g. assignments' : 'e.g. notes.txt'} className="field w-full" /></label>
@@ -1943,7 +1964,7 @@ export default function App() {
       )}
 
       {renameTarget && (
-        <div className="absolute inset-0 z-[127] flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm">
+        <div className="absolute inset-0 z-[200] flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm">
           <form onSubmit={submitRename} className="w-full max-w-sm rounded-2xl border border-white/[0.16] bg-[#202630]/95 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.5)] backdrop-blur-2xl">
             <div className="mb-4 flex items-center gap-3"><span className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/[0.1] bg-white/[0.07]"><Pencil className="h-5 w-5 text-sky-200" /></span><div className="min-w-0"><h3 className="text-sm font-semibold text-white">Rename {renameTarget.type === 'dir' ? 'folder' : 'file'}</h3><p className="mt-1 truncate text-[10px] text-slate-400">{renameTarget.name}</p></div></div>
             <label className="mb-4 block"><span className="mb-1.5 block text-[10px] text-slate-400">New name</span><input autoFocus value={renameName} onChange={(event) => setRenameName(event.target.value)} className="field w-full" /></label>
@@ -1953,16 +1974,16 @@ export default function App() {
       )}
 
       {quickSettingsOpen && (
-        <div className="absolute left-1/2 top-[58px] z-[115] w-72 -translate-x-1/2 rounded-xl border border-white/[0.16] bg-slate-950/[0.78] p-4 shadow-[0_18px_60px_rgba(0,0,0,0.4)] backdrop-blur-2xl">
+        <div className="absolute left-1/2 top-[58px] z-[200] w-72 -translate-x-1/2 rounded-xl border border-white/[0.16] bg-slate-950/[0.88] p-4 shadow-[0_24px_80px_rgba(0,0,0,0.6)] backdrop-blur-2xl">
           <div className="mb-3 flex items-center justify-between"><div><p className="text-sm font-semibold text-slate-100">System</p><p className="mt-1 text-[11px] text-slate-500">MINIOS controls and shortcuts</p></div><Clock3 className="h-4 w-4 text-slate-500" /></div>
           <div className="grid grid-cols-2 gap-2"><div className="rounded-lg border border-white/[0.07] bg-white/[0.035] p-3"><Wifi className="mb-2 h-4 w-4 text-slate-300" /><p className="text-xs text-slate-200">Network</p><p className="mt-1 text-[10px] text-slate-500">Connected · simulated</p></div><div className="rounded-lg border border-white/[0.07] bg-white/[0.035] p-3"><Battery className="mb-2 h-4 w-4 text-slate-300" /><p className="text-xs text-slate-200">Power</p><p className="mt-1 text-[10px] text-slate-500">Normal · simulated</p></div></div>
-          <button onClick={() => openWindow('settings')} className="mt-3 flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs text-slate-200 transition hover:bg-white/[0.08]"><Settings className="h-4 w-4 text-slate-300" />Open Settings</button>
+          <button onClick={() => { setQuickSettingsOpen(false); openWindow('settings'); }} className="mt-3 flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs text-slate-200 transition hover:bg-white/[0.08]"><Settings className="h-4 w-4 text-slate-300" />Open Settings</button>
           <button onClick={() => { setWindows((previous) => previous.map((win) => win.isOpen ? { ...win, isMinimized: true } : win)); setActiveWindow('desktop'); setQuickSettingsOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs text-slate-200 transition hover:bg-white/[0.08]"><Power className="h-4 w-4 text-slate-300" />Show desktop</button>
           <button onClick={() => { setQuickSettingsOpen(false); handleLogout(); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs text-rose-200 transition hover:bg-rose-500/[0.12]"><LogOut className="h-4 w-4 text-rose-300" />Sign out</button>
         </div>
       )}
 
-      {toast && <div className="absolute bottom-5 left-1/2 z-[120] -translate-x-1/2 rounded-lg border border-white/[0.1] bg-[#283243]/90 px-4 py-2.5 text-xs text-slate-100 shadow-xl backdrop-blur-2xl">{toast}</div>}
+      {toast && <div className="absolute bottom-5 left-1/2 z-[200] -translate-x-1/2 rounded-lg border border-white/[0.1] bg-[#283243]/90 px-4 py-2.5 text-xs text-slate-100 shadow-xl backdrop-blur-2xl">{toast}</div>}
 
     </div>
   );
