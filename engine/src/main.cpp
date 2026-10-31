@@ -143,6 +143,10 @@ int main()
             {
                 engine.killProcess(tok[1]);
             }
+            else if (cmd == "REMOVE" && tok.size() >= 2)
+            {
+                engine.removeProcess(tok[1]);
+            }
             else if (cmd == "SET_SCHEDULER" && tok.size() >= 2)
             {
                 const std::string& type = tok[1];

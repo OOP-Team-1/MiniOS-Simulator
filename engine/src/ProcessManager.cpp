@@ -19,6 +19,19 @@ Process* ProcessManager::getProcess(const std::string& PID)
     return nullptr;
 }
 
+bool ProcessManager::removeProcess(const std::string& PID)
+{
+    for (auto it = processes.begin(); it != processes.end(); ++it)
+    {
+        if ((*it)->getPID() == PID)
+        {
+            processes.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<Process*> ProcessManager::getAllProcesses()
 {
     std::vector<Process*> list;

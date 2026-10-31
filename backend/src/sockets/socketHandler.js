@@ -178,6 +178,14 @@ export function registerSocketEvents(io) {
                 sendCommand(`KILL ${safePID}`);
             }
         });
+        // Removes the process from the engine's process table entirely.
+        socket.on('cmd:remove_process', (data) => {
+            if (!data) return;
+            const safePID = String(data.pid).replace(/[^a-zA-Z0-9_-]/g, '');
+            if (safePID) {
+                sendCommand(`REMOVE ${safePID}`);
+            }
+        });
 
         // ── Directory operations ────────────────────────────────────────────────
         // Directory ids look like "D0", "D12", etc. — same safe charset as a PID/fileId.

@@ -14,6 +14,7 @@ class ProcessManager
         ProcessManager();
         Process& createProcess(std::string name,int priority,int arrivalTime,int burstTime,int memoryRequired);
         Process* getProcess(const std::string& PID);
+        bool removeProcess(const std::string& PID);
         std::vector<Process*> getAllProcesses();
         std::vector<const Process*> getAllProcesses() const;
         void clear();

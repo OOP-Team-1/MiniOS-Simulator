@@ -221,7 +221,6 @@ export default function App() {
   
   // Real C++ Engine State
   const [processes, setProcesses] = useState([]);
-  const [hiddenPIDs, setHiddenPIDs] = useState(new Set()); // Hides deleted processes visually
   const [ganttTimeline, setGanttTimeline] = useState([]);
   const [schedulerMetrics, setSchedulerMetrics] = useState({ averageWaiting: '—', averageTurnaround: '—' });
   const [schedulerLog, setSchedulerLog] = useState(['[system] Listening for C++ Engine telemetry...']);
@@ -311,18 +310,14 @@ export default function App() {
         
         setProcesses(translatedProcesses);
 
-        // Auto-clear hidden PIDs when simulation resets to tick 0 with no processes
+        // Keep the displayed tick in sync with the engine clock.
         if (typeof data.tick === 'number') {
           setCurrentTick(data.tick);
         }
-        if (data.tick === 0 && translatedProcesses.length === 0) {
-          setHiddenPIDs(new Set());
-        }
 
         // AUTO-PAUSE LOGIC
-        // If all visible processes have hit TERMINATED, send a pause command to stop backend clock
-        const visibleProcs = translatedProcesses.filter(p => !hiddenPIDs.has(p.pid));
-        const allDone = visibleProcs.length > 0 && visibleProcs.every(p => p.state === 'TERMINATED');
+        // If every process in the table has hit TERMINATED, pause the backend clock.
+        const allDone = translatedProcesses.length > 0 && translatedProcesses.every(p => p.state === 'TERMINATED');
         if (allDone) {
             socket.emit('timer:pause');
             setIsClockRunning(false);
@@ -377,7 +372,6 @@ export default function App() {
       setToast(data.message);
       setProcesses([]);
       setGanttTimeline([]);
-      setHiddenPIDs(new Set());
     });
 
     socket.on('engine:command_error', (data) => {
@@ -389,7 +383,7 @@ export default function App() {
       socket.off('engine:restarted');
       socket.off('engine:command_error');
     };
-  }, [hiddenPIDs]);
+  }, []);
 
   // 🔌 VFS + real-shell bridge (registered once).
   //
@@ -559,7 +553,7 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  const activeProcesses = processes.filter((p) => p.state !== 'BLOCKED' && !hiddenPIDs.has(p.pid)).length;
+  const activeProcesses = processes.filter((p) => p.state === 'READY' || p.state === 'RUNNING').length;
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const filteredApps = useMemo(() => INITIAL_APPS.filter((app) => `${app.title} ${app.subtitle}`.toLowerCase().includes(normalizedSearch)), [normalizedSearch]);
   const filteredWindows = useMemo(() => windows.filter((win) => win.isOpen && win.title.toLowerCase().includes(normalizedSearch)), [windows, normalizedSearch]);
@@ -568,6 +562,7 @@ export default function App() {
       .filter((d) => d.parentDirId === currentDirId)
       .map((d) => ({
         id: d.dirId,
+        dirId: d.dirId,
         name: d.name,
         type: 'dir',
         size: '—',
@@ -579,7 +574,12 @@ export default function App() {
     const childFiles = fsFiles
       .filter((f) => f.dirId === currentDirId)
       .map((f) => ({
+        // The Files app and the Text Editor share these rows. Keep both ids in
+        // sync so opening a file hands the editor a real `fileId` (the editor
+        // deliberately ignores entries that only carry the row `id`).
         id: f.fileId,
+        fileId: f.fileId,
+        dirId: f.dirId,
         name: f.name,
         type: 'file',
         size: `${f.sizeInBytes || 0} B (${f.sizeInBlocks} blk)`,
@@ -619,7 +619,7 @@ export default function App() {
     }
     return trail.length ? trail : [{ id: 'D0', name: 'root' }];
   }, [currentDirId, fsDirectories]);
-  const dockApps = useMemo(() => INITIAL_APPS.filter((app) => app.id !== 'settings' && (pinnedApps.includes(app.id) || windows.some((win) => win.id === app.id && win.isOpen))), [pinnedApps, windows]);
+  const dockApps = useMemo(() => INITIAL_APPS.filter((app) => app.id !== 'settings' && pinnedApps.includes(app.id)), [pinnedApps]);
 
   // Window Management functions
   const openWindow = (id) => {
@@ -714,10 +714,12 @@ export default function App() {
   };
 
 
-  const terminateProcess = (pid) => {
-    socket.emit('cmd:kill_process', { pid });
-    setHiddenPIDs(prev => new Set(prev).add(pid)); // Visually hide it instantly
-    setToast(`Sent kill signal for PID ${pid}.`);
+  const removeProcess = (pid) => {
+    // Remove the PCB from the engine, not just from the local view, so the
+    // process cannot reappear on the next telemetry frame or reconnect.
+    socket.emit('cmd:remove_process', { pid });
+    setProcesses((previous) => previous.filter((process) => process.pid !== pid));
+    setToast(`Removed process ${pid}.`);
   };
 
   const setPagePolicy = (policy) => {
@@ -745,7 +747,7 @@ export default function App() {
   const runSchedulerSimulation = () => {
     // 1. HYBRID FIX: Generate the visual timeline & metrics locally so the UI looks perfect
     // Only grab visible processes that haven't been terminated yet
-    const activeProcs = processes.filter(p => !hiddenPIDs.has(p.pid) && p.state !== 'TERMINATED');
+    const activeProcs = processes.filter(p => p.state !== 'TERMINATED');
     const simResults = runSchedulingSimulation(activeProcs, schedAlgo, timeQuantum);
     
     setGanttTimeline(simResults.timeline);
@@ -1188,11 +1190,11 @@ export default function App() {
                           <span className="text-[10px] text-slate-400">{isClockRunning ? 'Running' : 'Paused'}</span>
                         </div>
                         {(() => {
-                          const runningProc = processes.find(p => p.state === 'RUNNING' && !hiddenPIDs.has(p.pid));
+                          const runningProc = processes.find(p => p.state === 'RUNNING');
                           if (runningProc) {
                             return <span className="rounded-md border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] text-emerald-300"><span className="text-emerald-400">CPU:</span> {runningProc.name} ({runningProc.pid})</span>;
                           }
-                          const readyProcs = processes.filter(p => p.state === 'READY' && !hiddenPIDs.has(p.pid));
+                          const readyProcs = processes.filter(p => p.state === 'READY');
                           if (readyProcs.length) {
                             return <span className="rounded-md border border-amber-400/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300"><span className="text-amber-400">Next:</span> {readyProcs[0].name} ({readyProcs[0].pid})</span>;
                           }
@@ -1224,7 +1226,7 @@ export default function App() {
                           <RotateCcw className="h-3 w-3" /> Reset
                         </button>
                         <span className="rounded-md border border-white/[0.08] bg-white/[0.035] px-2.5 py-1.5 text-[11px] text-slate-400">
-                          <span className="font-semibold text-slate-200">{processes.filter(p => !hiddenPIDs.has(p.pid)).length}</span> processes
+                          <span className="font-semibold text-slate-200">{processes.length}</span> processes
                         </span>
                       </div>
                     } 
@@ -1235,7 +1237,7 @@ export default function App() {
                         <tr>{['PID', 'Process', 'State', 'Priority', 'Burst', 'Remaining', ''].map((heading) => <th key={heading} className="px-3.5 py-3 font-medium">{heading}</th>)}</tr>
                       </thead>
                       <tbody className="divide-y divide-white/[0.055]">
-                        {processes.filter(p => !hiddenPIDs.has(p.pid)).map((process) => (
+                        {processes.map((process) => (
                           <tr key={process.pid} className="transition hover:bg-white/[0.025]">
                             <td className="px-3.5 py-3 font-mono text-slate-400">{String(process.pid).padStart(3, '0')}</td>
                             <td className="px-3.5 py-3 font-medium text-slate-200">{process.name}</td>
@@ -1258,10 +1260,10 @@ export default function App() {
                             <td className="px-3.5 py-3 font-mono text-slate-400">{process.priority}</td>
                             <td className="px-3.5 py-3 font-mono text-slate-400">{process.burst}u</td>
                             <td className="px-3.5 py-3 font-mono text-slate-300">{process.remaining}u</td>
-                            <td className="px-3.5 py-3 text-right"><button onClick={() => terminateProcess(process.pid)} title={`Terminate ${process.name}`} className="rounded-md border border-white/[0.07] p-1.5 text-slate-500 transition hover:border-rose-400/20 hover:bg-rose-400/[0.08] hover:text-rose-300"><Trash2 className="h-3.5 w-3.5" /></button></td>
+                            <td className="px-3.5 py-3 text-right"><button onClick={() => removeProcess(process.pid)} title={`Remove ${process.name} from the process table`} className="rounded-md border border-white/[0.07] p-1.5 text-slate-500 transition hover:border-rose-400/20 hover:bg-rose-400/[0.08] hover:text-rose-300"><Trash2 className="h-3.5 w-3.5" /></button></td>
                           </tr>
                         ))}
-                        {!processes.filter(p => !hiddenPIDs.has(p.pid)).length && <tr><td colSpan="7" className="px-4 py-10 text-center text-slate-500">No active processes. Create one below.</td></tr>}
+                        {!processes.length && <tr><td colSpan="7" className="px-4 py-10 text-center text-slate-500">No processes. Create one below.</td></tr>}
                       </tbody>
                     </table>
                   </div>
@@ -1301,11 +1303,11 @@ export default function App() {
               {win.id === 'scheduler' && (
                 <div>
                   <SectionHeading eyebrow="Kernel / CPU" title="Scheduling laboratory" description="Compare scheduling policies using the active simulated processes." icon={Activity} action={(() => {
-                    const runningProc = processes.find(p => p.state === 'RUNNING' && !hiddenPIDs.has(p.pid));
+                    const runningProc = processes.find(p => p.state === 'RUNNING');
                     if (runningProc) {
                       return <span className="rounded-md border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] text-emerald-300"><span className="text-emerald-400">Current CPU:</span> {runningProc.name} ({runningProc.pid})</span>;
                     }
-                    const readyProcs = processes.filter(p => p.state === 'READY' && !hiddenPIDs.has(p.pid));
+                    const readyProcs = processes.filter(p => p.state === 'READY');
                     if (readyProcs.length) {
                       return <span className="rounded-md border border-amber-400/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300"><span className="text-amber-400">Next CPU:</span> {readyProcs[0].name} ({readyProcs[0].pid})</span>;
                     }
@@ -1840,8 +1842,8 @@ export default function App() {
               {win.id === 'system-monitor' && (
                 <div>
                   <SectionHeading eyebrow="System / Telemetry" title="System monitor" description="Values below are generated by this OS simulation; they do not measure the host computer." icon={Monitor} action={<span className="rounded-md border border-white/[0.08] px-2.5 py-1.5 text-[10px] text-slate-500">Demo telemetry</span>} />
-                  <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3"><StatCard label="Runnable processes" value={activeProcesses} helper="READY or RUNNING" icon={Cpu} /><StatCard label="Process table" value={processes.filter(p => !hiddenPIDs.has(p.pid)).length} helper="Including blocked tasks" icon={Activity} /><StatCard label="System state" value="Stable" helper="No simulated alerts" icon={ShieldCheck} /></div>
-                  <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4"><h3 className="mb-4 text-xs font-semibold text-slate-300">Process distribution</h3>{['RUNNING', 'READY', 'BLOCKED'].map((state) => { const visibleProcs = processes.filter(p => !hiddenPIDs.has(p.pid)); const count = visibleProcs.filter((p) => p.state === state).length; const pct = visibleProcs.length ? (count / visibleProcs.length) * 100 : 0; return <div key={state} className="mb-4 last:mb-0"><div className="mb-2 flex justify-between text-[11px]"><span className="text-slate-400">{state}</span><span className="font-mono text-slate-300">{count}</span></div><div className="h-1.5 overflow-hidden rounded-full bg-white/[0.06]"><div style={{ width: `${pct}%` }} className={`h-full rounded-full ${state === 'RUNNING' ? 'bg-emerald-300/70' : state === 'READY' ? 'bg-amber-200/70' : 'bg-slate-500/70'}`} /></div></div>; })}</div>
+                  <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3"><StatCard label="Runnable processes" value={activeProcesses} helper="READY or RUNNING" icon={Cpu} /><StatCard label="Process table" value={processes.length} helper="All states, including terminated" icon={Activity} /><StatCard label="System state" value="Stable" helper="No simulated alerts" icon={ShieldCheck} /></div>
+                  <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4"><h3 className="mb-4 text-xs font-semibold text-slate-300">Process distribution</h3>{['RUNNING', 'READY', 'BLOCKED', 'TERMINATED'].map((state) => { const count = processes.filter((p) => p.state === state).length; const pct = processes.length ? (count / processes.length) * 100 : 0; return <div key={state} className="mb-4 last:mb-0"><div className="mb-2 flex justify-between text-[11px]"><span className="text-slate-400">{state}</span><span className="font-mono text-slate-300">{count}</span></div><div className="h-1.5 overflow-hidden rounded-full bg-white/[0.06]"><div style={{ width: `${pct}%` }} className={`h-full rounded-full ${state === 'RUNNING' ? 'bg-emerald-300/70' : state === 'READY' ? 'bg-amber-200/70' : state === 'BLOCKED' ? 'bg-rose-300/60' : 'bg-slate-500/70'}`} /></div></div>; })}</div>
                 </div>
               )}
 

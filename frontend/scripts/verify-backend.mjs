@@ -187,6 +187,19 @@ async function main() {
         check('ps prints a process table header', ps.output.includes('PID'));
         check('ps lists the spawned process', ps.output.includes('worker'), JSON.stringify(ps.output));
 
+        // Removing a process must erase its PCB in the engine, not just hide it
+        // in the UI, so it cannot reappear on the next telemetry frame.
+        const worker = (latestTelemetry?.processes || []).find((p) => p.name === 'worker');
+        check('telemetry exposes the spawned PID', Boolean(worker?.pid));
+        socket.emit('cmd:remove_process', { pid: worker.pid });
+        await waitForTelemetry((t) => !(t.processes || []).some((p) => p.pid === worker.pid));
+        check('removed process disappears from telemetry', true);
+        check(
+            'removing a process frees its memory',
+            (latestTelemetry?.memory?.usedMemory ?? -1) === 0,
+            JSON.stringify(latestTelemetry?.memory)
+        );
+
         const mem = await exec('mem');
         check('mem prints memory totals', /Total:/.test(mem.output), JSON.stringify(mem.output));
 

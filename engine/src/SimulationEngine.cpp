@@ -438,6 +438,32 @@ bool SimulationEngine::killProcess(const std::string& pid)
     return true;
 }
 
+bool SimulationEngine::removeProcess(const std::string& pid)
+{
+    Process* p = processManager.getProcess(pid);
+    if (!p) return false;
+
+    // A live process still owns memory/paging/files; release those first.
+    // Already-terminated processes were cleaned up when they finished.
+    if (p->getState() != "TERMINATED")
+    {
+        killProcess(pid);
+    }
+
+    if (lastExecutedPID == pid)
+    {
+        lastExecutedPID = "NONE";
+    }
+
+    bool removed = processManager.removeProcess(pid);
+    if (removed)
+    {
+        log("Process " + pid + " removed from the process table");
+        checkPendingProcesses();
+    }
+    return removed;
+}
+
 int SimulationEngine::getCurrentTick() const
 {
     return this->currentTick;

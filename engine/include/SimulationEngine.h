@@ -93,6 +93,10 @@ public:
 
     bool killProcess(const std::string& pid);
 
+    // Terminates the process (if needed), releases its resources, and removes
+    // its PCB from the process table.
+    bool removeProcess(const std::string& pid);
+
     void compactDisk();
     void compactMemory();
 
