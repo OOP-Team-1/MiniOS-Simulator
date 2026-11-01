@@ -1,4 +1,4 @@
-# MiniOS Simulator 🖥️⚡
+# MiniOS Simulator 
 
 [![C++ Standard](https://img.shields.io/badge/C%2B%2B-20-blue.svg?style=for-the-badge&logo=c%2B%2B)](https://en.cppreference.com/w/cpp/20)
 [![CMake Version](https://img.shields.io/badge/CMake-3.20%2B-064F8C.svg?style=for-the-badge&logo=cmake)](https://cmake.org/)
@@ -460,7 +460,7 @@ Ensure your system meets the following software requirements:
 
 ---
 
-## 🚀 Installation & Quick Start
+## Installation & Quick Start
 
 ### 1. Clone the Repository
 ```bash
@@ -519,7 +519,7 @@ Create a new user account (e.g., `admin`) and password, and you are ready to exp
 
 ---
 
-## 🧪 Testing & Automated Verification
+## Testing & Automated Verification
 
 MiniOS includes a comprehensive end-to-end verification harness located at [`verify-backend.mjs`](frontend/scripts/verify-backend.mjs). It boots an isolated backend and native engine, drives socket transactions, and tests 10 critical phases:
 
@@ -613,18 +613,6 @@ COMPACT                                # Compact RAM blocks
 DISK_COMPACT                           # Compact disk blocks
 EXIT                                   # Gracefully terminate engine
 ```
-
-### VFS Serialization Specification (`MINIOS_VFS 1`)
-
-MiniOS uses a custom line-delimited format to serialize filesystem snapshots:
-```text
-MINIOS_VFS 1
-D <dirId> <parentDirId|-> <createdAtTick> <nameBase64>
-F <fileId> <dirId> <createdAtTick> <ownerPIDBase64> <nameBase64> <contentBase64|->
-```
-- **Line 1**: Magic header `MINIOS_VFS 1`.
-- **`D` Record**: Directory definition. Root directory is `D D0 - 0 Lw==` (where `Lw==` is base64 for `/`).
-- **`F` Record**: File definition including directory reference, metadata, and base64 file content.
 
 ---
 

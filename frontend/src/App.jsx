@@ -1140,7 +1140,6 @@ export default function App() {
           ) : (
             <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-300/90 shadow-[0_0_8px_rgba(110,231,183,0.28)]" />
           )}
-          <span className="text-[10px] font-semibold tracking-wider text-sky-200">MINIOS</span>
           <span className="h-3 w-px bg-white/[0.16]" />
           <span className="text-[10px] font-medium text-slate-300">{currentTime.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}</span>
           <span className="h-3 w-px bg-white/[0.16]" />
@@ -1173,7 +1172,7 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   if (win?.isOpen && !win?.isMinimized && activeWindow === app.id) {
-                    toggleMinimize(app.id, { stopPropagation() {} });
+                    toggleMinimize(app.id, { stopPropagation() { } });
                   } else {
                     openWindow(app.id);
                   }
@@ -1274,11 +1273,10 @@ export default function App() {
                         <button
                           onClick={toggleClock}
                           title={isClockRunning ? 'Pause clock' : 'Start continuous 1-tick/sec simulation'}
-                          className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition active:scale-95 ${
-                            isClockRunning
+                          className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition active:scale-95 ${isClockRunning
                               ? 'border-amber-400/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
                               : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20'
-                          }`}
+                            }`}
                         >
                           {isClockRunning ? <><Pause className="h-3 w-3" /> Pause Clock</> : <><Play className="h-3 w-3" /> Run Clock</>}
                         </button>
@@ -1309,15 +1307,14 @@ export default function App() {
                             <td className="px-3.5 py-3 font-mono text-slate-400">{String(process.pid).padStart(3, '0')}</td>
                             <td className="px-3.5 py-3 font-medium text-slate-200">{process.name}</td>
                             <td className="px-3.5 py-3">
-                              <span className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium ${
-                                process.state === 'RUNNING'
+                              <span className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium ${process.state === 'RUNNING'
                                   ? 'border-emerald-400/20 bg-emerald-400/[0.08] text-emerald-300'
                                   : process.state === 'READY'
-                                  ? 'border-amber-300/20 bg-amber-300/[0.07] text-amber-200'
-                                  : process.state === 'NEW'
-                                  ? 'border-sky-400/30 bg-sky-400/[0.1] text-sky-300'
-                                  : 'border-rose-400/30 bg-rose-400/[0.1] text-rose-300'
-                              }`}>
+                                    ? 'border-amber-300/20 bg-amber-300/[0.07] text-amber-200'
+                                    : process.state === 'NEW'
+                                      ? 'border-sky-400/30 bg-sky-400/[0.1] text-sky-300'
+                                      : 'border-rose-400/30 bg-rose-400/[0.1] text-rose-300'
+                                }`}>
                                 {process.state}
                                 {process.state === 'NEW' && <span className="font-mono text-[9px] text-slate-400">arr:{process.arrivalTime ?? 0}</span>}
                               </span>
@@ -1642,18 +1639,16 @@ export default function App() {
                           <button
                             type="button"
                             onClick={() => setMemoryTab('paging')}
-                            className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition ${
-                              memoryTab === 'paging' ? 'bg-sky-500/20 text-sky-200 border border-sky-400/30' : 'text-slate-400 hover:text-slate-200'
-                            }`}
+                            className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition ${memoryTab === 'paging' ? 'bg-sky-500/20 text-sky-200 border border-sky-400/30' : 'text-slate-400 hover:text-slate-200'
+                              }`}
                           >
                             Paging & Frames
                           </button>
                           <button
                             type="button"
                             onClick={() => setMemoryTab('partitions')}
-                            className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition ${
-                              memoryTab === 'partitions' ? 'bg-sky-500/20 text-sky-200 border border-sky-400/30' : 'text-slate-400 hover:text-slate-200'
-                            }`}
+                            className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition ${memoryTab === 'partitions' ? 'bg-sky-500/20 text-sky-200 border border-sky-400/30' : 'text-slate-400 hover:text-slate-200'
+                              }`}
                           >
                             Contiguous Partitions
                           </button>
@@ -1711,13 +1706,12 @@ export default function App() {
                                 type="button"
                                 onClick={() => { if (frame.processPID) setSelectedPagingPID(frame.processPID); }}
                                 title={isAlloc ? `Frame #${frame.frameId}: Process ${frame.processPID} (Page ${frame.pageNumber})` : `Frame #${frame.frameId}: Free`}
-                                className={`group relative flex aspect-square flex-col items-center justify-center rounded-md border text-[10px] font-mono transition duration-150 ${
-                                  isAlloc
+                                className={`group relative flex aspect-square flex-col items-center justify-center rounded-md border text-[10px] font-mono transition duration-150 ${isAlloc
                                     ? isSelectedProc
                                       ? 'border-sky-300 bg-sky-400/30 text-white ring-2 ring-sky-300/50 shadow-[0_0_12px_rgba(56,189,248,0.3)]'
                                       : `${color.border} ${color.bg} ${color.text} hover:scale-105`
                                     : 'border-white/[0.04] bg-white/[0.02] text-slate-600 hover:border-white/[0.1]'
-                                }`}
+                                  }`}
                               >
                                 <span className="text-[9px] font-semibold">{frame.frameId}</span>
                                 {isAlloc && <span className="mt-0.5 scale-90 truncate font-mono text-[8px] font-bold tracking-tighter opacity-90">{frame.processPID}</span>}
@@ -1850,11 +1844,10 @@ export default function App() {
                                 key={strat}
                                 type="button"
                                 onClick={() => setAllocStrategy(strat)}
-                                className={`flex-1 rounded py-1 text-center font-mono text-[10px] font-semibold transition ${
-                                  activeAllocStrategy === strat
+                                className={`flex-1 rounded py-1 text-center font-mono text-[10px] font-semibold transition ${activeAllocStrategy === strat
                                     ? 'bg-emerald-400/20 text-emerald-200 border border-emerald-400/40'
                                     : 'bg-white/[0.04] text-slate-400 hover:bg-white/[0.08]'
-                                }`}
+                                  }`}
                               >
                                 {strat.replace('Fit', '')}
                               </button>
@@ -1886,9 +1879,8 @@ export default function App() {
                                   key={idx}
                                   style={{ width: `${pct}%` }}
                                   title={block.isFree ? `Free Block: ${block.size} MB (${block.start} - ${block.end})` : `Process ${block.processPID}: ${block.size} MB (${block.start} - ${block.end})`}
-                                  className={`relative flex h-full items-center justify-center border-r border-black/50 text-[10px] font-mono font-medium transition ${
-                                    block.isFree ? 'bg-slate-800/40 text-slate-500' : `${color.bg} ${color.text} font-semibold`
-                                  }`}
+                                  className={`relative flex h-full items-center justify-center border-r border-black/50 text-[10px] font-mono font-medium transition ${block.isFree ? 'bg-slate-800/40 text-slate-500' : `${color.bg} ${color.text} font-semibold`
+                                    }`}
                                 >
                                   <span className="truncate px-1">{block.isFree ? `Free ${block.size}M` : `${block.processPID} (${block.size}M)`}</span>
                                 </div>
@@ -1963,11 +1955,10 @@ export default function App() {
                               <button
                                 type="button"
                                 onClick={() => togglePinnedApp(app.id)}
-                                className={`rounded-md border px-2.5 py-1 text-[10px] font-medium transition ${
-                                  isPinned
+                                className={`rounded-md border px-2.5 py-1 text-[10px] font-medium transition ${isPinned
                                     ? 'border-rose-400/30 bg-rose-500/10 text-rose-200 hover:bg-rose-500/20'
                                     : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20'
-                                }`}
+                                  }`}
                               >
                                 {isPinned ? 'Unpin from dock' : 'Pin to dock'}
                               </button>
@@ -1995,7 +1986,6 @@ export default function App() {
                         {wallpaperImage && <button onClick={() => { setWallpaperImage(''); setWallpaperName(''); setToast('Wallpaper reset to the selected color palette.'); }} className="rounded-lg border border-white/[0.1] px-3 py-2.5 text-xs text-slate-300 transition hover:bg-white/[0.06]">Reset wallpaper</button>}
                         <span className="max-w-full truncate text-[11px] text-slate-400">{wallpaperName || 'No custom image selected'}</span>
                       </div>
-                      <p className="mt-3 text-[10px] leading-5 text-slate-500">Images apply to this browser session and are not uploaded to a server.</p>
                     </section>
                     <section className="flex items-center justify-between gap-4 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
                       <div className="flex items-center gap-3">
@@ -2064,11 +2054,10 @@ export default function App() {
                       <button
                         type="button"
                         onClick={(event) => { event.stopPropagation(); togglePinnedApp(app.id); }}
-                        className={`shrink-0 rounded-md border px-2 py-1 text-[10px] font-medium transition ${
-                          isPinned
+                        className={`shrink-0 rounded-md border px-2 py-1 text-[10px] font-medium transition ${isPinned
                             ? 'border-white/[0.14] bg-white/[0.06] text-slate-300 hover:border-rose-400/30 hover:bg-rose-500/15 hover:text-rose-200'
                             : 'border-sky-400/30 bg-sky-500/15 text-sky-200 hover:bg-sky-500/25'
-                        }`}
+                          }`}
                       >
                         {isPinned ? 'Unpin' : 'Pin'}
                       </button>
