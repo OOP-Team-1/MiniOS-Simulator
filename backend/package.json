@@ -5,9 +5,9 @@
   "main": "src/index.js",
   "scripts": {
     "build:engine": "node ../build.js",
-    "build": "npm run build:engine",
-    "prestart": "npm run build:engine",
-    "start": "node --env-file-if-exists=.env src/index.js"
+    "build": "node ../build.js",
+    "start": "node ../build.js --if-needed && node --env-file-if-exists=.env src/index.js",
+    "dev": "node ../build.js --if-needed && node --env-file-if-exists=.env src/index.js"
   },
   "keywords": [],
   "author": "",
