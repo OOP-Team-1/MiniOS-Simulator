@@ -11,11 +11,8 @@ import AuthScreen from './components/AuthScreen';
 import TextEditor from './components/TextEditor';
 import { loadBrowserSnapshotRecord, saveBrowserSnapshot } from './lib/vfsStore';
 
-// Strips the ANSI colour/control sequences the C++ shell emits (ls colours,
-// `clear`, ...) so they don't show up as literal escape text in the terminal.
 const ANSI_PATTERN = /\u001b\[[0-9;]*[A-Za-z]/g;
 const stripAnsi = (text) => String(text ?? '').replace(ANSI_PATTERN, '');
-
 
 const INITIAL_APPS = [
   { id: 'process-manager', title: 'Processes', subtitle: 'Process manager', icon: Cpu },
@@ -39,10 +36,11 @@ const INITIAL_WINDOWS = [
   { id: 'settings', title: 'Settings', isOpen: false, isMinimized: false, isMaximized: false, zIndex: 0, x: 205, y: 130, w: 760, h: 500 },
 ];
 
+const DEFAULT_PINNED_APPS = INITIAL_APPS.filter((app) => app.id !== 'settings').map((app) => app.id);
+const PINNED_STORAGE_KEY = 'minios:pinnedApps';
+
 const getFileKey = (file) => file.id;
 
-// Monotonic id for "open this file in the text editor" requests, so handing the
-// same file twice still counts as a new request.
 let editorRequestSeq = 0;
 
 function getDisplayPath(dirId, directories) {
@@ -89,13 +87,10 @@ function getProcColor(pid) {
   return PROC_PALETTE[Math.abs(hash) % PROC_PALETTE.length];
 }
 
-// ============================================================================
-// LOCAL GANTT MATH (Hybrid fallback for perfect UI visuals)
-// ============================================================================
 function runSchedulingSimulation(processes, algorithm, quantum) {
   const jobs = processes
     .map((p) => ({ ...p, remaining: Math.max(1, Number(p.burst) || 1), start: null, completion: null, waiting: 0 }))
-    .sort((a, b) => (a.arrival || 0) - (b.arrival || 0) || a.pid - b.pid);
+    .sort((a, b) => (a.arrival || 0) - (b.arrival || 0) || String(a.pid).localeCompare(String(b.pid)));
 
   if (!jobs.length) return { timeline: [], averageWaiting: 0, averageTurnaround: 0 };
 
@@ -141,11 +136,11 @@ function runSchedulingSimulation(processes, algorithm, quantum) {
       }
       let selected;
       if (algorithm === 'SJF') {
-        selected = available.sort((a, b) => a.burst - b.burst || (a.arrival||0) - (b.arrival||0) || a.pid - b.pid)[0];
+        selected = available.sort((a, b) => a.burst - b.burst || (a.arrival || 0) - (b.arrival || 0))[0];
       } else if (algorithm === 'PRIORITY') {
-        selected = available.sort((a, b) => a.priority - b.priority || (a.arrival||0) - (b.arrival||0) || a.pid - b.pid)[0];
+        selected = available.sort((a, b) => a.priority - b.priority || (a.arrival || 0) - (b.arrival || 0))[0];
       } else {
-        selected = available.sort((a, b) => (a.arrival||0) - (b.arrival||0) || a.pid - b.pid)[0]; // FCFS
+        selected = available.sort((a, b) => (a.arrival || 0) - (b.arrival || 0))[0];
       }
       if (selected.start === null) selected.start = time;
       addSlice(selected, selected.remaining);
@@ -155,8 +150,8 @@ function runSchedulingSimulation(processes, algorithm, quantum) {
     }
   }
 
-  const waitingTotal = completed.reduce((sum, p) => sum + Math.max(0, p.completion - (p.arrival||0) - p.burst), 0);
-  const turnaroundTotal = completed.reduce((sum, p) => sum + (p.completion - (p.arrival||0)), 0);
+  const waitingTotal = completed.reduce((sum, p) => sum + Math.max(0, p.completion - (p.arrival || 0) - p.burst), 0);
+  const turnaroundTotal = completed.reduce((sum, p) => sum + (p.completion - (p.arrival || 0)), 0);
   return {
     timeline,
     averageWaiting: (waitingTotal / completed.length).toFixed(1),
@@ -207,7 +202,18 @@ export default function App() {
   const [wallpaperName, setWallpaperName] = useState('pexels-hakantahmaz-6015200.jpg');
   const [iconSize, setIconSize] = useState('md');
   const [dockPosition, setDockPosition] = useState('left');
-  const [pinnedApps, setPinnedApps] = useState(() => INITIAL_APPS.filter((app) => app.id !== 'settings').map((app) => app.id));
+  const [pinnedApps, setPinnedApps] = useState(() => {
+    try {
+      const saved = localStorage.getItem(PINNED_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return DEFAULT_PINNED_APPS;
+  });
   const [dockContextMenu, setDockContextMenu] = useState(null);
   const [dockTooltip, setDockTooltip] = useState(null);
   const [windows, setWindows] = useState(INITIAL_WINDOWS);
@@ -218,8 +224,8 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [draggingWin, setDraggingWin] = useState(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
-  
-  // Real C++ Engine State
+  const [logoError, setLogoError] = useState(false);
+
   const [processes, setProcesses] = useState([]);
   const [ganttTimeline, setGanttTimeline] = useState([]);
   const [schedulerMetrics, setSchedulerMetrics] = useState({ averageWaiting: '—', averageTurnaround: '—' });
@@ -235,7 +241,7 @@ export default function App() {
 
   const [schedAlgo, setSchedAlgo] = useState('RR');
   const [timeQuantum, setTimeQuantum] = useState(3);
-  
+
   const [termInput, setTermInput] = useState('');
   const [termHistory, setTermHistory] = useState(['MINIOS shell 2.4.0', 'Type help to see supported commands.', '']);
   const [fsDirectories, setFsDirectories] = useState([
@@ -257,79 +263,77 @@ export default function App() {
   const [selectedFileKeys, setSelectedFileKeys] = useState([]);
   const [fileClipboard, setFileClipboard] = useState(null);
   const [selectionBox, setSelectionBox] = useState(null);
-  // ── Text Editor app ──────────────────────────────────────────────────────
-  // Open documents live here (not inside the window) so closing the editor
-  // window and reopening it keeps every tab, like a real desktop app.
+
   const [editorTabs, setEditorTabs] = useState([]);
   const [activeEditorTab, setActiveEditorTab] = useState(null);
-  // Changes whenever the Files app hands a file to the editor.
   const [editorOpenRequest, setEditorOpenRequest] = useState(null);
   const [renameTarget, setRenameTarget] = useState(null);
   const [renameName, setRenameName] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [toast, setToast] = useState('');
 
-  // Session lives in React state only — refreshing the page always returns to
-  // the AuthScreen, exactly as the requirements ask.
   const [session, setSession] = useState(null);
   const [shellPrompt, setShellPrompt] = useState('');
-  // Mirror of `session` for socket callbacks registered once, so a reconnect
-  // can re-load the signed-in user's filesystem without a stale closure.
   const sessionRef = useRef(null);
+  const deletedPidsRef = useRef(new Set());
 
   const overviewSearchRef = useRef(null);
   const terminalEndRef = useRef(null);
+  const terminalInputRef = useRef(null);
   const fileListRef = useRef(null);
-  // Set on login; the telemetry handler jumps the desktop into this user's
-  // /home/<user> folder the first time it appears, then clears itself.
   const pendingHomeRef = useRef(null);
 
-  // Time ticker
+  useEffect(() => {
+    try {
+      localStorage.setItem(PINNED_STORAGE_KEY, JSON.stringify(pinnedApps));
+    } catch {
+      // ignore storage errors
+    }
+  }, [pinnedApps]);
+
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
 
-  // 🔌 SOCKET.IO LISTENERS
   useEffect(() => {
     socket.on('telemetry:update', (data) => {
       if (data && data.processes) {
-        // Translate C++ variables to React format + Force UPPERCASE state
-        const translatedProcesses = data.processes.map(p => {
-          const rawState = p.state ?? p.status ?? 'READY';
-          return {
-            ...p,
-            pid: p.pid ?? p.id ?? p.processId ?? '?',
-            name: p.name ?? p.process_name ?? 'Unknown',
-            state: String(rawState).toUpperCase(),
-            priority: p.priority ?? 1,
-            burst: p.burst ?? p.burstTime ?? p.burst_time ?? p.total_time ?? '?',
-            remaining: p.remaining ?? p.remainingTime ?? p.remaining_time ?? '?'
-          };
-        });
-        
+        const translatedProcesses = data.processes
+          .map((p) => {
+            const pid = p.pid ?? p.id ?? p.processId ?? '?';
+            const rawState = String(p.state ?? p.status ?? 'READY').toUpperCase();
+            const rawRemaining = p.remaining ?? p.remainingTime ?? p.remaining_time ?? 0;
+            return {
+              ...p,
+              pid,
+              name: p.name ?? p.process_name ?? 'Unknown',
+              state: rawState,
+              priority: p.priority ?? 1,
+              burst: p.burst ?? p.burstTime ?? p.burst_time ?? p.total_time ?? '?',
+              remaining: rawState === 'TERMINATED' ? 0 : rawRemaining,
+            };
+          })
+          .filter((p) => !deletedPidsRef.current.has(p.pid));
+
         setProcesses(translatedProcesses);
 
-        // Keep the displayed tick in sync with the engine clock.
         if (typeof data.tick === 'number') {
           setCurrentTick(data.tick);
         }
 
-        // AUTO-PAUSE LOGIC
-        // If every process in the table has hit TERMINATED, pause the backend clock.
-        const allDone = translatedProcesses.length > 0 && translatedProcesses.every(p => p.state === 'TERMINATED');
+        const allDone = translatedProcesses.length > 0 && translatedProcesses.every((p) => p.state === 'TERMINATED');
         if (allDone) {
-            socket.emit('timer:pause');
-            setIsClockRunning(false);
+          socket.emit('timer:pause');
+          setIsClockRunning(false);
         }
 
-        // If C++ natively sends a timeline or metrics, use them, otherwise rely on our Hybrid math
         if (data.timeline && data.timeline.length > 0) setGanttTimeline(data.timeline);
         if (data.metrics && data.metrics.averageWaiting) {
-            setSchedulerMetrics({
-              averageWaiting: data.metrics.averageWaiting,
-              averageTurnaround: data.metrics.averageTurnaround
-            });
+          setSchedulerMetrics({
+            averageWaiting: data.metrics.averageWaiting,
+            averageTurnaround: data.metrics.averageTurnaround,
+          });
         }
       }
       if (data.config && data.config.allocStrategy) {
@@ -342,7 +346,6 @@ export default function App() {
         setPagingStats(data.paging);
       }
 
-      // 2. FileSystem telemetry (Directories + Files)
       if (data.filesystem) {
         setDiskStats(data.filesystem);
         const dirs = data.filesystem.directories || [];
@@ -350,8 +353,6 @@ export default function App() {
         setFsDirectories(dirs);
         setFsFiles(files);
 
-        // First telemetry after login: drop the desktop into the user's home
-        // folder and align the real shell with it, then never again.
         if (pendingHomeRef.current) {
           const homeName = pendingHomeRef.current;
           const homeDir = dirs.find((d) => d.name === homeName);
@@ -363,12 +364,12 @@ export default function App() {
           }
         }
 
-        // Keep the current directory if it still exists, otherwise fall back to root.
         setCurrentDirId((prevDirId) => (dirs.some((d) => d.dirId === prevDirId) ? prevDirId : 'D0'));
       }
     });
 
     socket.on('engine:restarted', (data) => {
+      deletedPidsRef.current.clear();
       setToast(data.message);
       setProcesses([]);
       setGanttTimeline([]);
@@ -385,14 +386,6 @@ export default function App() {
     };
   }, []);
 
-  // 🔌 VFS + real-shell bridge (registered once).
-  //
-  //  * `vfs:snapshot`  — the engine changed the filesystem; mirror the snapshot
-  //                      into IndexedDB as the browser's safety-net copy.
-  //  * `shell:result`  — output of a real CommandPrompt (or kernel) command.
-  //  * `cwd:result`    — the shell was re-pointed at a directory by the GUI.
-  //  * `connect`       — the backend (re)started: reload this user's filesystem
-  //                      from the server mirror so nothing on disk is lost.
   useEffect(() => {
     socket.on('vfs:snapshot', (data) => {
       if (data && data.user && typeof data.snapshot === 'string' && data.snapshot) {
@@ -400,11 +393,6 @@ export default function App() {
       }
     });
 
-    // A backend restart spawns a brand-new engine with an empty in-RAM
-    // filesystem. The backend restores the last active user by itself, but the
-    // desktop still has to re-sync (home folder, shell prompt, file listing),
-    // so re-issue the same load a login performs. The server mirror is
-    // authoritative; the browser copy is only consulted when it is newer.
     const handleConnect = () => {
       const current = sessionRef.current;
       if (!current) return;
@@ -426,16 +414,15 @@ export default function App() {
     socket.on('shell:result', (data) => {
       if (!data) return;
       const rawOutput = String(data.output ?? '');
+      const trimmedCmd = (data.command || '').trim().toLowerCase();
 
-      // `clear` (and the ANSI erase-display sequence) wipes the scrollback.
-      if ((data.command || '').trim().toLowerCase() === 'clear' || rawOutput.includes('\u001b[2J')) {
+      if (trimmedCmd === 'clear' || trimmedCmd === 'cls' || rawOutput.includes('\u001b[2J')) {
         setTermHistory(['MINIOS shell 2.4.0', '']);
       } else {
         const cleaned = stripAnsi(rawOutput).replace(/\n+$/, '');
         setTermHistory((previous) => (cleaned ? [...previous, cleaned, ''] : [...previous, '']));
       }
 
-      // Keep the terminal and the file manager on the same directory.
       if (data.cwdId) setCurrentDirId(data.cwdId);
       if (data.prompt) setShellPrompt(stripAnsi(data.prompt).replace(/\s+$/, ' '));
     });
@@ -452,7 +439,6 @@ export default function App() {
     };
   }, []);
 
-  // Global Shortcuts
   useEffect(() => {
     const handleGlobalShortcut = (event) => {
       if (event.key === 'Escape') {
@@ -485,7 +471,6 @@ export default function App() {
     terminalEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [termHistory]);
 
-  // File Selection Logic
   useEffect(() => {
     if (!selectionBox) return undefined;
     const handleSelectionMove = (event) => {
@@ -514,7 +499,6 @@ export default function App() {
     };
   }, [selectionBox]);
 
-  // Window dragging logic
   useEffect(() => {
     if (!draggingWin) return undefined;
     const handleMouseMove = (event) => {
@@ -553,10 +537,19 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [toast]);
 
+  const nonTerminatedProcesses = useMemo(
+    () => processes.filter((p) => p.state !== 'TERMINATED'),
+    [processes]
+  );
+  const terminatedProcesses = useMemo(
+    () => processes.filter((p) => p.state === 'TERMINATED'),
+    [processes]
+  );
   const activeProcesses = processes.filter((p) => p.state === 'READY' || p.state === 'RUNNING').length;
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const filteredApps = useMemo(() => INITIAL_APPS.filter((app) => `${app.title} ${app.subtitle}`.toLowerCase().includes(normalizedSearch)), [normalizedSearch]);
   const filteredWindows = useMemo(() => windows.filter((win) => win.isOpen && win.title.toLowerCase().includes(normalizedSearch)), [windows, normalizedSearch]);
+
   const visibleFiles = useMemo(() => {
     const childDirs = fsDirectories
       .filter((d) => d.parentDirId === currentDirId)
@@ -574,9 +567,6 @@ export default function App() {
     const childFiles = fsFiles
       .filter((f) => f.dirId === currentDirId)
       .map((f) => ({
-        // The Files app and the Text Editor share these rows. Keep both ids in
-        // sync so opening a file hands the editor a real `fileId` (the editor
-        // deliberately ignores entries that only carry the row `id`).
         id: f.fileId,
         fileId: f.fileId,
         dirId: f.dirId,
@@ -599,11 +589,8 @@ export default function App() {
   const currentFolderLabel = currentFolderObj ? currentFolderObj.name : 'root';
   const isAtFileRoot = currentDirId === 'D0';
 
-  // Prompt shown in the terminal input row. The engine supplies the real shell
-  // prompt (with ANSI stripped); this fallback matches its shape until it does.
   const promptText = shellPrompt || `${session?.user ?? 'user'}@minios:${currentPathDisplay}$ `;
 
-  // Clickable breadcrumb trail from root down to the current directory.
   const breadcrumbTrail = useMemo(() => {
     const map = new Map(fsDirectories.map((d) => [d.dirId, d]));
     const trail = [];
@@ -619,9 +606,9 @@ export default function App() {
     }
     return trail.length ? trail : [{ id: 'D0', name: 'root' }];
   }, [currentDirId, fsDirectories]);
+
   const dockApps = useMemo(() => INITIAL_APPS.filter((app) => app.id !== 'settings' && pinnedApps.includes(app.id)), [pinnedApps]);
 
-  // Window Management functions
   const openWindow = (id) => {
     const nextZ = topZ + 1;
     setTopZ(nextZ);
@@ -661,7 +648,6 @@ export default function App() {
     setAppLauncherOpen((open) => !open); setQuickSettingsOpen(false); setContextMenu(null); setDockContextMenu(null); setDockTooltip(null); setSearchQuery('');
   };
 
-  // 🚀 SOCKET EMITS TO C++ ENGINE
   const stepSimulation = () => {
     socket.emit('cmd:step');
     setToast('Stepped simulation clock by 1 tick.');
@@ -680,6 +666,7 @@ export default function App() {
   };
 
   const resetSimulation = () => {
+    deletedPidsRef.current.clear();
     socket.emit('cmd:reset');
     setIsClockRunning(false);
     setToast('Simulation reset to Tick 0.');
@@ -692,17 +679,17 @@ export default function App() {
     const priority = Number.parseInt(newProcPriority, 10);
     const memory = Number.parseInt(newProcMemory, 10);
     const arrival = Number.parseInt(newProcArrival, 10);
-    
+
     if (!name) return setToast('Enter a process name first.');
     if (!Number.isFinite(burst) || burst < 1) return setToast('Burst time must be at least 1.');
     if (!Number.isFinite(memory) || memory < 1) return setToast('Memory must be at least 1 MB.');
 
-    socket.emit('cmd:add_process', { 
-      name: name, 
-      burst: burst, 
+    socket.emit('cmd:add_process', {
+      name,
+      burst,
       priority: Number.isFinite(priority) ? priority : 1,
       arrival: Number.isFinite(arrival) ? arrival : 0,
-      memory: memory
+      memory,
     });
 
     setNewProcName('');
@@ -713,13 +700,31 @@ export default function App() {
     }
   };
 
+  const killProcess = (pid) => {
+    socket.emit('cmd:kill_process', { pid });
+    setProcesses((previous) =>
+      previous.map((proc) => (proc.pid === pid ? { ...proc, state: 'TERMINATED', remaining: 0 } : proc))
+    );
+    setToast(`Terminated process ${pid}.`);
+  };
 
   const removeProcess = (pid) => {
-    // Remove the PCB from the engine, not just from the local view, so the
-    // process cannot reappear on the next telemetry frame or reconnect.
+    deletedPidsRef.current.add(pid);
+    socket.emit('cmd:kill_process', { pid });
     socket.emit('cmd:remove_process', { pid });
     setProcesses((previous) => previous.filter((process) => process.pid !== pid));
-    setToast(`Removed process ${pid}.`);
+    setToast(`Deleted process ${pid}.`);
+  };
+
+  const clearTerminatedProcesses = () => {
+    const toRemove = processes.filter((p) => p.state === 'TERMINATED');
+    if (!toRemove.length) return;
+    toRemove.forEach((p) => {
+      deletedPidsRef.current.add(p.pid);
+      socket.emit('cmd:remove_process', { pid: p.pid });
+    });
+    setProcesses((previous) => previous.filter((p) => p.state !== 'TERMINATED'));
+    setToast(`Cleared ${toRemove.length} terminated process(es).`);
   };
 
   const setPagePolicy = (policy) => {
@@ -745,28 +750,23 @@ export default function App() {
   };
 
   const runSchedulerSimulation = () => {
-    // 1. HYBRID FIX: Generate the visual timeline & metrics locally so the UI looks perfect
-    // Only grab visible processes that haven't been terminated yet
-    const activeProcs = processes.filter(p => p.state !== 'TERMINATED');
+    const activeProcs = processes.filter((p) => p.state !== 'TERMINATED');
     const simResults = runSchedulingSimulation(activeProcs, schedAlgo, timeQuantum);
-    
+
     setGanttTimeline(simResults.timeline);
     setSchedulerMetrics({
-        averageWaiting: simResults.averageWaiting,
-        averageTurnaround: simResults.averageTurnaround
+      averageWaiting: simResults.averageWaiting,
+      averageTurnaround: simResults.averageTurnaround,
     });
-    
-    // 2. Still send commands to C++ so the backend data stays in sync
+
     socket.emit('cmd:set_scheduler', { type: schedAlgo, quantum: timeQuantum });
     socket.emit('timer:start', { intervalMs: 1000 });
     setIsClockRunning(true);
-    
+
     setSchedulerLog((prev) => [`[dispatch] Selected ${schedAlgo}. Auto-stepping started.`, ...prev].slice(0, 12));
     setToast('Simulation completed visuals & backend clock started...');
   };
 
-  // File Manager & Terminal Functions
-  // Navigates the GUI and aligns the real shell with the same directory.
   const navigateToDir = (dirId) => {
     setCurrentDirId(dirId);
     setSelectedFileKeys([]);
@@ -776,10 +776,13 @@ export default function App() {
   const goUpDirectory = () => {
     if (currentDirId === 'D0') return;
     const currentFolder = fsDirectories.find((d) => d.dirId === currentDirId);
-    if (currentFolder && currentFolder.parentDirId) navigateToDir(currentFolder.parentDirId);
+    if (currentFolder && currentFolder.parentDirId) {
+      navigateToDir(currentFolder.parentDirId);
+    } else {
+      navigateToDir('D0');
+    }
   };
 
-  // Hands a file to the Text Editor app (and brings its window forward).
   const openFileInEditor = (file) => {
     if (!file || file.type !== 'file') return;
     setContextMenu(null);
@@ -790,15 +793,16 @@ export default function App() {
   };
 
   const openFileEntry = (file) => {
+    if (!file) return;
     setContextMenu(null);
     setSelectedFileKeys([getFileKey(file)]);
     if (file.type === 'dir') {
       navigateToDir(file.id);
       return;
     }
-    // Files open in the Text Editor app, which reads/writes through the engine.
     openFileInEditor(file);
   };
+
   const openFileContextMenu = (event, entry = null) => {
     event.preventDefault(); event.stopPropagation();
     let targetKeys = selectedFileKeys;
@@ -810,14 +814,17 @@ export default function App() {
     setContextMenu({ x: event.clientX, y: event.clientY, selectedKeys: [...targetKeys] });
     setContextNewOpen(false); setDockContextMenu(null);
   };
+
   const beginFileSelection = (event) => {
     if (event.button !== 0) return;
     if (event.target.closest('button, input, textarea')) return;
     const startedOnFileRow = Boolean(event.target.closest('[data-file-key]'));
     setContextMenu(null); setDockContextMenu(null);
-    if (!startedOnFileRow) setSelectedFileKeys([]);
+    if (startedOnFileRow) return;
+    setSelectedFileKeys([]);
     setSelectionBox({ startX: event.clientX, startY: event.clientY, currentX: event.clientX, currentY: event.clientY });
   };
+
   const handleFileRowClick = (event, file) => {
     const key = getFileKey(file);
     if (event.ctrlKey || event.metaKey) {
@@ -834,28 +841,45 @@ export default function App() {
       }
     }
     setSelectedFileKeys([key]);
+    openFileEntry(file);
   };
+
   const openDockContextMenu = (event, appId) => {
     if (!appId || appId === 'settings') return;
-    event.preventDefault(); event.stopPropagation();
+    event.preventDefault();
+    event.stopPropagation();
+    setDockTooltip(null);
+    setContextMenu(null);
+    setQuickSettingsOpen(false);
     setDockContextMenu({ x: event.clientX, y: event.clientY, appId });
-    setContextMenu(null); setQuickSettingsOpen(false);
   };
+
   const togglePinnedApp = (appId) => {
-    const isPinned = pinnedApps.includes(appId);
-    setPinnedApps((previous) => isPinned ? previous.filter((id) => id !== appId) : [...previous, appId]);
+    if (!appId || appId === 'settings') return;
+    setPinnedApps((previous) => {
+      const isCurrentlyPinned = previous.includes(appId);
+      const next = isCurrentlyPinned
+        ? previous.filter((id) => id !== appId)
+        : [...previous, appId];
+      setToast(isCurrentlyPinned ? 'App unpinned from dock.' : 'App pinned to dock.');
+      return next;
+    });
     setDockContextMenu(null);
-    setToast(isPinned ? 'App unpinned.' : 'App pinned to the dock.');
+    setDockTooltip(null);
   };
+
   const showDockTooltip = (event, title) => {
+    if (dockContextMenu) return;
     const rect = event.currentTarget.getBoundingClientRect();
     if (dockPosition === 'bottom') setDockTooltip({ title, x: rect.left + rect.width / 2, y: rect.top - 8, placement: 'top' });
     else if (dockPosition === 'right') setDockTooltip({ title, x: rect.left - 8, y: rect.top + rect.height / 2, placement: 'left' });
     else setDockTooltip({ title, x: rect.right + 8, y: rect.top + rect.height / 2, placement: 'right' });
   };
+
   const beginCreateItem = (type) => {
     setContextMenu(null); setContextNewOpen(false); setNewItemType(type); setNewItemName('');
   };
+
   const copyOrCutSelectedFiles = (operation) => {
     const keys = contextMenu?.selectedKeys || selectedFileKeys;
     const items = visibleFiles.filter((item) => keys.includes(item.id));
@@ -864,6 +888,7 @@ export default function App() {
     setContextMenu(null);
     setToast(`${operation === 'copy' ? 'Copied' : 'Cut'} ${items.length} item(s).`);
   };
+
   const pasteFiles = () => {
     if (!fileClipboard?.items?.length) return;
     const { operation, items, sourceDirId } = fileClipboard;
@@ -895,7 +920,7 @@ export default function App() {
       setToast(`Copied ${items.length} item(s).`);
     }
   };
-  
+
   const deleteItemRecursive = (item) => {
     if (!item) return;
     if (item.type === 'file') {
@@ -909,6 +934,7 @@ export default function App() {
       deleteSubtree(item.id);
     }
   };
+
   const deleteSelectedFiles = () => {
     const keys = contextMenu?.selectedKeys || selectedFileKeys;
     const itemsToDelete = visibleFiles.filter((item) => keys.includes(item.id));
@@ -918,6 +944,7 @@ export default function App() {
     setContextMenu(null);
     setToast(`Deleted ${itemsToDelete.length} item(s).`);
   };
+
   const handleWallpaperUpload = (event) => {
     const imageFile = event.target.files?.[0];
     if (!imageFile) return;
@@ -928,10 +955,7 @@ export default function App() {
     reader.readAsDataURL(imageFile);
     event.target.value = '';
   };
-  // Echoes the real shell prompt plus the typed line, then hands it to the
-  // backend. Filesystem commands run through the real C++ CommandPrompt; kernel
-  // verbs (ps/mem/spawn/kill/step/run/pause/reset) are answered by the OS layer.
-  // The answer always comes back asynchronously as `shell:result`.
+
   const runTerminalCommand = (command) => {
     const line = String(command ?? '').trim();
     if (!line) return;
@@ -944,6 +968,15 @@ export default function App() {
     if (!termInput.trim()) return;
     runTerminalCommand(termInput);
     setTermInput('');
+  };
+
+  // Locks the terminal input cursor to the end of the text so the left side cannot be edited
+  const keepTerminalCursorAtEnd = (element) => {
+    if (!element) return;
+    const len = element.value.length;
+    if (element.selectionStart !== len || element.selectionEnd !== len) {
+      element.setSelectionRange(len, len);
+    }
   };
 
   const createFileSystemItem = (event) => {
@@ -965,7 +998,7 @@ export default function App() {
     setNewItemName('');
     setNewItemType(null);
   };
-  // ── Rename ──────────────────────────────────────────────────────────────
+
   const beginRename = (entry) => {
     if (!entry) return;
     setContextMenu(null);
@@ -993,11 +1026,6 @@ export default function App() {
     setRenameTarget(null);
   };
 
-  // ── Session (login / logout) ────────────────────────────────────────────
-  // The backend prefers its own server mirror and falls back to the browser
-  // copy, so we simply hand it whichever snapshot we have — with its timestamp,
-  // so the newer of the two always wins. Jumping to the user's home folder is
-  // deferred until the matching telemetry arrives.
   const handleAuthenticated = async (username, isNew) => {
     let snapshot = null;
     let snapshotUpdatedAt = null;
@@ -1007,7 +1035,7 @@ export default function App() {
         snapshot = record?.snapshot ?? null;
         snapshotUpdatedAt = record?.updatedAt ?? null;
       } catch {
-        snapshot = null; // browser mirror is only a fallback; never block login
+        snapshot = null;
         snapshotUpdatedAt = null;
       }
     }
@@ -1038,13 +1066,6 @@ export default function App() {
     socket.emit('timer:pause');
     setIsClockRunning(false);
   };
-  
-  const deleteFile = (entry) => {
-    if (!entry) return;
-    deleteItemRecursive(entry);
-    setSelectedFileKeys((previous) => previous.filter((key) => key !== getFileKey(entry)));
-    setToast(`Deleted ${entry.name}.`);
-  };
 
   useEffect(() => {
     const handleFileShortcuts = (event) => {
@@ -1053,10 +1074,21 @@ export default function App() {
       const editingText = target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
       if (editingText) return;
 
-      // F2 renames the single selected entry (matches the context-menu hint).
+      if (event.key === 'Backspace' && !isAtFileRoot) {
+        event.preventDefault();
+        goUpDirectory();
+        return;
+      }
+
       if (event.key === 'F2' && selectedFileKeys.length === 1) {
         event.preventDefault();
         beginRename(visibleFiles.find((item) => item.id === selectedFileKeys[0]));
+        return;
+      }
+
+      if (event.key === 'Enter' && selectedFileKeys.length === 1) {
+        event.preventDefault();
+        openFileEntry(visibleFiles.find((item) => item.id === selectedFileKeys[0]));
         return;
       }
 
@@ -1068,9 +1100,8 @@ export default function App() {
     };
     window.addEventListener('keydown', handleFileShortcuts);
     return () => window.removeEventListener('keydown', handleFileShortcuts);
-  }, [activeWindow, selectedFileKeys, fileClipboard, contextMenu, visibleFiles, currentDirId]);
+  }, [activeWindow, selectedFileKeys, fileClipboard, contextMenu, visibleFiles, currentDirId, isAtFileRoot]);
 
-  // CSS and Theme configurations
   const themeClass = theme === 'aurora' ? 'from-[#17605e] via-[#245274] to-[#483d78]' : theme === 'sunset' ? 'from-[#874b5b] via-[#59436f] to-[#2b5272]' : 'from-[#24506d] via-[#354777] to-[#533d70]';
   const dockIconSize = iconSize === 'sm' ? 'h-10 w-10' : iconSize === 'lg' ? 'h-14 w-14' : 'h-12 w-12';
   const dockGlyphSize = iconSize === 'sm' ? 'h-4 w-4' : iconSize === 'lg' ? 'h-6 w-6' : 'h-5 w-5';
@@ -1085,28 +1116,38 @@ export default function App() {
   const fileSelectionStyle = selectionBox && fileSelectionBounds ? { left: Math.min(selectionBox.startX, selectionBox.currentX) - fileSelectionBounds.left, top: Math.min(selectionBox.startY, selectionBox.currentY) - fileSelectionBounds.top, width: Math.abs(selectionBox.currentX - selectionBox.startX), height: Math.abs(selectionBox.currentY - selectionBox.startY) } : null;
   const activeMaximizedWindow = windows.some((win) => win.isOpen && !win.isMinimized && win.isMaximized && win.id === activeWindow);
 
-  // Auth gate: the desktop is only reachable once an account is authenticated.
-  // Session state is in-memory only, so a refresh always lands back here.
   if (!session) {
     return <AuthScreen onAuthenticated={handleAuthenticated} />;
   }
 
   return (
     <div className={`relative h-screen w-screen select-none overflow-hidden bg-gradient-to-br ${themeClass} font-sans text-slate-200`} style={wallpaperImage ? { backgroundImage: `linear-gradient(rgba(7, 10, 18, .38), rgba(7, 10, 18, .52)), url("${wallpaperImage}")`, backgroundSize: 'cover', backgroundPosition: 'center', backgroundRepeat: 'no-repeat' } : undefined}>
-      
+
       <div className={`pointer-events-none absolute inset-0 opacity-30 ${wallpaperImage ? 'hidden' : ''}`} aria-hidden="true">
         <div className="absolute -right-40 -top-44 h-[34rem] w-[34rem] rounded-full border border-white/[0.045]" />
         <div className="absolute -right-20 -top-24 h-[26rem] w-[26rem] rounded-full border border-white/[0.035]" />
         <div className="absolute bottom-[-19rem] left-[28%] h-[38rem] w-[38rem] rounded-full border border-white/[0.04]" />
       </div>
 
-      {!draggingWin && !activeMaximizedWindow && <button onClick={() => { setQuickSettingsOpen((open) => !open); setAppLauncherOpen(false); setDockContextMenu(null); setContextMenu(null); }} aria-label="Open system menu" className="absolute left-1/2 top-3 z-[190] flex -translate-x-1/2 items-center gap-3 rounded-full border border-white/[0.22] bg-slate-950/[0.42] px-4 py-2 text-slate-100 shadow-[0_10px_40px_rgba(0,0,0,0.24)] ring-1 ring-white/[0.04] backdrop-blur-2xl transition hover:bg-slate-950/[0.58]">
-        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-300/90 shadow-[0_0_8px_rgba(110,231,183,0.28)]" />
-        <span className="text-[10px] font-medium text-slate-300">{currentTime.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}</span>
-        <span className="h-3 w-px bg-white/[0.16]" />
-        <span className="text-xs font-semibold tabular-nums text-white">{currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-        <ChevronDown className={`h-3 w-3 text-slate-300/80 transition-transform ${quickSettingsOpen ? 'rotate-180' : ''}`} />
-      </button>}
+      {!draggingWin && !activeMaximizedWindow && (
+        <button
+          onClick={() => { setQuickSettingsOpen((open) => !open); setAppLauncherOpen(false); setDockContextMenu(null); setContextMenu(null); }}
+          aria-label="Open system menu"
+          className="absolute left-1/2 top-3 z-[190] flex -translate-x-1/2 items-center gap-3 rounded-full border border-white/[0.22] bg-slate-950/[0.42] px-4 py-1.5 text-slate-100 shadow-[0_10px_40px_rgba(0,0,0,0.24)] ring-1 ring-white/[0.04] backdrop-blur-2xl transition hover:bg-slate-950/[0.58]"
+        >
+          {!logoError ? (
+            <img src="/logo.png" alt="MiniOS" className="h-4 w-4 rounded-sm object-contain" onError={() => setLogoError(true)} />
+          ) : (
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-300/90 shadow-[0_0_8px_rgba(110,231,183,0.28)]" />
+          )}
+          <span className="text-[10px] font-semibold tracking-wider text-sky-200">MINIOS</span>
+          <span className="h-3 w-px bg-white/[0.16]" />
+          <span className="text-[10px] font-medium text-slate-300">{currentTime.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}</span>
+          <span className="h-3 w-px bg-white/[0.16]" />
+          <span className="text-xs font-semibold tabular-nums text-white">{currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+          <ChevronDown className={`h-3 w-3 text-slate-300/80 transition-transform ${quickSettingsOpen ? 'rotate-180' : ''}`} />
+        </button>
+      )}
 
       {!draggingWin && !activeMaximizedWindow && (
         <div className="absolute right-3 top-3 z-[190] flex items-center gap-2 rounded-full border border-white/[0.22] bg-slate-950/[0.42] py-1 pl-1 pr-1.5 text-slate-100 shadow-[0_10px_40px_rgba(0,0,0,0.24)] ring-1 ring-white/[0.04] backdrop-blur-2xl">
@@ -1127,8 +1168,25 @@ export default function App() {
             const isSelected = activeWindow === app.id && win?.isOpen && !win?.isMinimized;
             const isOpen = win?.isOpen;
             return (
-              <button key={app.id} onClick={() => { if (win?.isOpen && !win?.isMinimized && activeWindow === app.id) { toggleMinimize(app.id, { stopPropagation() {} }); } else openWindow(app.id); }} aria-label={app.title} onContextMenu={(event) => openDockContextMenu(event, app.id)} onMouseEnter={(event) => showDockTooltip(event, app.title)} onMouseLeave={() => setDockTooltip(null)} className={`group relative flex ${dockIconSize} shrink-0 items-center justify-center rounded-xl border transition duration-200 ease-out hover:-translate-y-1 hover:scale-105 ${isSelected ? 'border-white/[0.23] bg-white/[0.17] shadow-lg' : 'border-transparent hover:border-white/[0.14] hover:bg-white/[0.11]'}`}>
-                <span className={`${dockBadgeSize} flex items-center justify-center rounded-lg border border-black/75 bg-slate-950/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_4px_10px_rgba(0,0,0,0.22)] ${APP_TONES[app.id].split(' ')[0]}`}><AppIcon app={app} size={iconSize} /></span>
+              <button
+                key={app.id}
+                type="button"
+                onClick={() => {
+                  if (win?.isOpen && !win?.isMinimized && activeWindow === app.id) {
+                    toggleMinimize(app.id, { stopPropagation() {} });
+                  } else {
+                    openWindow(app.id);
+                  }
+                }}
+                aria-label={app.title}
+                onContextMenu={(event) => openDockContextMenu(event, app.id)}
+                onMouseEnter={(event) => showDockTooltip(event, `${app.title} (Right-click to unpin)`)}
+                onMouseLeave={() => setDockTooltip(null)}
+                className={`group relative flex ${dockIconSize} shrink-0 items-center justify-center rounded-xl border transition duration-200 ease-out hover:-translate-y-1 hover:scale-105 ${isSelected ? 'border-white/[0.23] bg-white/[0.17] shadow-lg' : 'border-transparent hover:border-white/[0.14] hover:bg-white/[0.11]'}`}
+              >
+                <span className={`${dockBadgeSize} flex items-center justify-center rounded-lg border border-black/75 bg-slate-950/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_4px_10px_rgba(0,0,0,0.22)] ${APP_TONES[app.id].split(' ')[0]}`}>
+                  <AppIcon app={app} size={iconSize} />
+                </span>
                 {isOpen && <span className={`absolute ${isBottomDock ? '-bottom-[5px] left-1/2 h-[3px] w-4 -translate-x-1/2' : '-left-[5px] h-4 w-[3px]'} rounded-full ${isSelected ? 'bg-white' : 'bg-slate-300/75'}`} />}
               </button>
             );
@@ -1136,7 +1194,13 @@ export default function App() {
         </div>
         <div className={isBottomDock ? 'mx-2 h-8 w-px shrink-0 bg-white/20' : 'mb-2 mt-3 h-px w-8 shrink-0 bg-white/20'} />
         <button onClick={toggleOverview} aria-label="Open overview" onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }} onMouseEnter={(event) => showDockTooltip(event, 'Applications overview')} onMouseLeave={() => setDockTooltip(null)} className={`${dockIconSize} ${isBottomDock ? 'ml-1' : 'mt-0'} flex shrink-0 items-center justify-center rounded-xl border border-white/[0.16] bg-slate-950/45 text-slate-100 shadow-md transition duration-200 ease-out hover:-translate-y-1 hover:scale-105 hover:bg-slate-950/60 hover:shadow-lg`}>
-          <span className={`${dockBadgeSize} flex items-center justify-center rounded-lg border border-black/70 bg-slate-950/70 shadow-inner`}><LayoutGrid className={dockGlyphSize} strokeWidth={1.8} /></span>
+          <span className={`${dockBadgeSize} flex items-center justify-center overflow-hidden rounded-lg border border-black/70 bg-slate-950/70 shadow-inner`}>
+            {!logoError ? (
+              <img src="/logo.png" alt="MiniOS" className="h-full w-full object-cover" onError={() => setLogoError(true)} />
+            ) : (
+              <LayoutGrid className={dockGlyphSize} strokeWidth={1.8} />
+            )}
+          </span>
         </button>
       </aside>
 
@@ -1175,11 +1239,11 @@ export default function App() {
             <div className={`min-h-0 flex-1 ${win.id === 'terminal' ? 'overflow-hidden p-3' : win.id === 'text-editor' ? 'overflow-hidden p-0' : 'overflow-auto p-5'}`}>
               {win.id === 'process-manager' && (
                 <div>
-                  <SectionHeading 
-                    eyebrow="Kernel / Process table" 
-                    title="Process manager" 
-                    description="Inspect process states, advance simulation clock, and create simulated processes." 
-                    icon={Cpu} 
+                  <SectionHeading
+                    eyebrow="Kernel / Process table"
+                    title="Process manager"
+                    description="Inspect active and terminated processes, advance simulation clock, and manage process lifecycle."
+                    icon={Cpu}
                     action={
                       <div className="flex flex-wrap items-center gap-2">
                         <div className="flex items-center gap-1.5 rounded-lg border border-white/[0.08] bg-black/40 px-3 py-1.5 text-xs font-mono">
@@ -1190,68 +1254,69 @@ export default function App() {
                           <span className="text-[10px] text-slate-400">{isClockRunning ? 'Running' : 'Paused'}</span>
                         </div>
                         {(() => {
-                          const runningProc = processes.find(p => p.state === 'RUNNING');
+                          const runningProc = processes.find((p) => p.state === 'RUNNING');
                           if (runningProc) {
                             return <span className="rounded-md border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] text-emerald-300"><span className="text-emerald-400">CPU:</span> {runningProc.name} ({runningProc.pid})</span>;
                           }
-                          const readyProcs = processes.filter(p => p.state === 'READY');
+                          const readyProcs = processes.filter((p) => p.state === 'READY');
                           if (readyProcs.length) {
                             return <span className="rounded-md border border-amber-400/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300"><span className="text-amber-400">Next:</span> {readyProcs[0].name} ({readyProcs[0].pid})</span>;
                           }
                           return <span className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-[11px] text-slate-500">CPU: Idle</span>;
                         })()}
-                        <button 
-                          onClick={stepSimulation} 
-                          title="Advance simulation clock by 1 tick" 
+                        <button
+                          onClick={stepSimulation}
+                          title="Advance simulation clock by 1 tick"
                           className="flex items-center gap-1 rounded-lg border border-sky-400/30 bg-sky-500/10 px-2.5 py-1.5 text-xs font-medium text-sky-300 transition hover:bg-sky-500/20 active:scale-95"
                         >
                           <Play className="h-3 w-3" /> Step (1 Tick)
                         </button>
-                        <button 
-                          onClick={toggleClock} 
-                          title={isClockRunning ? "Pause clock" : "Start continuous 1-tick/sec simulation"} 
+                        <button
+                          onClick={toggleClock}
+                          title={isClockRunning ? 'Pause clock' : 'Start continuous 1-tick/sec simulation'}
                           className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition active:scale-95 ${
-                            isClockRunning 
-                              ? 'border-amber-400/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20' 
+                            isClockRunning
+                              ? 'border-amber-400/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
                               : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20'
                           }`}
                         >
                           {isClockRunning ? <><Pause className="h-3 w-3" /> Pause Clock</> : <><Play className="h-3 w-3" /> Run Clock</>}
                         </button>
-                        <button 
-                          onClick={resetSimulation} 
-                          title="Reset simulation back to Tick 0" 
+                        <button
+                          onClick={resetSimulation}
+                          title="Reset simulation back to Tick 0"
                           className="flex items-center gap-1 rounded-lg border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-xs text-slate-400 transition hover:bg-white/[0.08] hover:text-slate-200"
                         >
                           <RotateCcw className="h-3 w-3" /> Reset
                         </button>
-                        <span className="rounded-md border border-white/[0.08] bg-white/[0.035] px-2.5 py-1.5 text-[11px] text-slate-400">
-                          <span className="font-semibold text-slate-200">{processes.length}</span> processes
-                        </span>
                       </div>
-                    } 
+                    }
                   />
+
+                  <div className="mb-2 flex items-center justify-between">
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                      Active Processes ({nonTerminatedProcesses.length})
+                    </h3>
+                  </div>
                   <div className="overflow-x-auto rounded-xl border border-white/[0.08]">
                     <table className="w-full min-w-[690px] text-left text-xs">
                       <thead className="bg-white/[0.035] text-[10px] uppercase tracking-[0.11em] text-slate-500">
-                        <tr>{['PID', 'Process', 'State', 'Priority', 'Burst', 'Remaining', ''].map((heading) => <th key={heading} className="px-3.5 py-3 font-medium">{heading}</th>)}</tr>
+                        <tr>{['PID', 'Process', 'State', 'Priority', 'Burst', 'Remaining', 'Actions'].map((heading) => <th key={heading} className={`px-3.5 py-3 font-medium ${heading === 'Actions' ? 'text-right' : ''}`}>{heading}</th>)}</tr>
                       </thead>
                       <tbody className="divide-y divide-white/[0.055]">
-                        {processes.map((process) => (
+                        {nonTerminatedProcesses.map((process) => (
                           <tr key={process.pid} className="transition hover:bg-white/[0.025]">
                             <td className="px-3.5 py-3 font-mono text-slate-400">{String(process.pid).padStart(3, '0')}</td>
                             <td className="px-3.5 py-3 font-medium text-slate-200">{process.name}</td>
                             <td className="px-3.5 py-3">
                               <span className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-medium ${
-                                process.state === 'RUNNING' 
-                                  ? 'border-emerald-400/20 bg-emerald-400/[0.08] text-emerald-300' 
-                                  : process.state === 'READY' 
-                                  ? 'border-amber-300/20 bg-amber-300/[0.07] text-amber-200' 
+                                process.state === 'RUNNING'
+                                  ? 'border-emerald-400/20 bg-emerald-400/[0.08] text-emerald-300'
+                                  : process.state === 'READY'
+                                  ? 'border-amber-300/20 bg-amber-300/[0.07] text-amber-200'
                                   : process.state === 'NEW'
                                   ? 'border-sky-400/30 bg-sky-400/[0.1] text-sky-300'
-                                  : process.state === 'BLOCKED'
-                                  ? 'border-rose-400/30 bg-rose-400/[0.1] text-rose-300'
-                                  : 'border-slate-400/15 bg-slate-400/[0.06] text-slate-400'
+                                  : 'border-rose-400/30 bg-rose-400/[0.1] text-rose-300'
                               }`}>
                                 {process.state}
                                 {process.state === 'NEW' && <span className="font-mono text-[9px] text-slate-400">arr:{process.arrivalTime ?? 0}</span>}
@@ -1260,13 +1325,88 @@ export default function App() {
                             <td className="px-3.5 py-3 font-mono text-slate-400">{process.priority}</td>
                             <td className="px-3.5 py-3 font-mono text-slate-400">{process.burst}u</td>
                             <td className="px-3.5 py-3 font-mono text-slate-300">{process.remaining}u</td>
-                            <td className="px-3.5 py-3 text-right"><button onClick={() => removeProcess(process.pid)} title={`Remove ${process.name} from the process table`} className="rounded-md border border-white/[0.07] p-1.5 text-slate-500 transition hover:border-rose-400/20 hover:bg-rose-400/[0.08] hover:text-rose-300"><Trash2 className="h-3.5 w-3.5" /></button></td>
+                            <td className="px-3.5 py-3 text-right">
+                              <div className="inline-flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => killProcess(process.pid)}
+                                  title={`Terminate ${process.name} (move to Terminated list)`}
+                                  className="rounded-md border border-amber-400/25 bg-amber-400/10 px-2 py-1 text-[10px] font-medium text-amber-200 transition hover:bg-amber-400/20"
+                                >
+                                  Terminate
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => removeProcess(process.pid)}
+                                  title={`Delete ${process.name} from process table`}
+                                  className="rounded-md border border-white/[0.07] p-1.5 text-slate-400 transition hover:border-rose-400/30 hover:bg-rose-400/[0.12] hover:text-rose-300"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            </td>
                           </tr>
                         ))}
-                        {!processes.length && <tr><td colSpan="7" className="px-4 py-10 text-center text-slate-500">No processes. Create one below.</td></tr>}
+                        {!nonTerminatedProcesses.length && (
+                          <tr><td colSpan="7" className="px-4 py-8 text-center text-slate-500">No active processes. Create one below.</td></tr>
+                        )}
                       </tbody>
                     </table>
                   </div>
+
+                  <div className="mt-5">
+                    <div className="mb-2 flex items-center justify-between">
+                      <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                        Terminated Processes ({terminatedProcesses.length})
+                      </h3>
+                      {terminatedProcesses.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={clearTerminatedProcesses}
+                          className="flex items-center gap-1 rounded-md border border-rose-400/25 bg-rose-500/10 px-2.5 py-1 text-[10px] font-medium text-rose-200 transition hover:bg-rose-500/20"
+                        >
+                          <Trash2 className="h-3 w-3" /> Clear All Terminated
+                        </button>
+                      )}
+                    </div>
+                    <div className="overflow-x-auto rounded-xl border border-white/[0.08] bg-black/20">
+                      <table className="w-full min-w-[690px] text-left text-xs">
+                        <thead className="bg-white/[0.025] text-[10px] uppercase tracking-[0.11em] text-slate-500">
+                          <tr>{['PID', 'Process', 'State', 'Priority', 'Burst', 'Remaining', 'Delete'].map((heading) => <th key={heading} className={`px-3.5 py-2.5 font-medium ${heading === 'Delete' ? 'text-right' : ''}`}>{heading}</th>)}</tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/[0.045]">
+                          {terminatedProcesses.map((process) => (
+                            <tr key={process.pid} className="transition hover:bg-white/[0.02]">
+                              <td className="px-3.5 py-2.5 font-mono text-slate-500">{String(process.pid).padStart(3, '0')}</td>
+                              <td className="px-3.5 py-2.5 font-medium text-slate-400 line-through">{process.name}</td>
+                              <td className="px-3.5 py-2.5">
+                                <span className="inline-flex items-center rounded-md border border-slate-400/20 bg-slate-400/[0.08] px-2 py-0.5 text-[10px] font-medium text-slate-400">
+                                  TERMINATED
+                                </span>
+                              </td>
+                              <td className="px-3.5 py-2.5 font-mono text-slate-500">{process.priority}</td>
+                              <td className="px-3.5 py-2.5 font-mono text-slate-500">{process.burst}u</td>
+                              <td className="px-3.5 py-2.5 font-mono text-slate-500">0u</td>
+                              <td className="px-3.5 py-2.5 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => removeProcess(process.pid)}
+                                  title={`Delete ${process.name}`}
+                                  className="inline-flex items-center gap-1 rounded-md border border-rose-400/25 bg-rose-500/10 px-2 py-1 text-[10px] font-medium text-rose-200 transition hover:bg-rose-500/20"
+                                >
+                                  <Trash2 className="h-3 w-3" /> Delete
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                          {!terminatedProcesses.length && (
+                            <tr><td colSpan="7" className="px-4 py-6 text-center text-slate-500">No terminated processes yet.</td></tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
                   <form onSubmit={addProcess} className="mt-5 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
                     <div className="mb-3 flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -1284,12 +1424,12 @@ export default function App() {
                       <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Priority</span><input type="number" min="0" value={newProcPriority} onChange={(e) => setNewProcPriority(e.target.value)} className="field w-full" /></label>
                       <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Arrival</span><input type="number" min="0" value={newProcArrival} onChange={(e) => setNewProcArrival(e.target.value)} className="field w-full" /></label>
                       <button type="submit" className="self-end rounded-lg bg-slate-100 px-3.5 py-2.5 text-xs font-semibold text-slate-900 transition hover:bg-white"><Plus className="mr-1 inline h-3.5 w-3.5" />Create</button>
-                      <button 
-                        type="button" 
+                      <button
+                        type="button"
                         onClick={(e) => {
                           addProcess(e);
                           setTimeout(() => socket.emit('cmd:step'), 150);
-                        }} 
+                        }}
                         title="Create process and advance clock by 1 tick immediately"
                         className="self-end rounded-lg border border-sky-400/30 bg-sky-500/20 px-3.5 py-2.5 text-xs font-semibold text-sky-200 transition hover:bg-sky-500/30"
                       >
@@ -1303,11 +1443,11 @@ export default function App() {
               {win.id === 'scheduler' && (
                 <div>
                   <SectionHeading eyebrow="Kernel / CPU" title="Scheduling laboratory" description="Compare scheduling policies using the active simulated processes." icon={Activity} action={(() => {
-                    const runningProc = processes.find(p => p.state === 'RUNNING');
+                    const runningProc = processes.find((p) => p.state === 'RUNNING');
                     if (runningProc) {
                       return <span className="rounded-md border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] text-emerald-300"><span className="text-emerald-400">Current CPU:</span> {runningProc.name} ({runningProc.pid})</span>;
                     }
-                    const readyProcs = processes.filter(p => p.state === 'READY');
+                    const readyProcs = processes.filter((p) => p.state === 'READY');
                     if (readyProcs.length) {
                       return <span className="rounded-md border border-amber-400/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300"><span className="text-amber-400">Next CPU:</span> {readyProcs[0].name} ({readyProcs[0].pid})</span>;
                     }
@@ -1340,11 +1480,41 @@ export default function App() {
               {win.id === 'terminal' && (
                 <div className="flex h-full min-h-[280px] flex-col overflow-hidden rounded-lg border border-white/[0.09] bg-[#0a0d10]/95 font-mono text-[11px] shadow-inner">
                   <div className="flex shrink-0 items-center justify-between border-b border-white/[0.055] px-4 py-2.5"><div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-emerald-400/80" /><span className="text-[10px] text-slate-400">minios@kernel</span></div><span className="text-[10px] text-slate-600">MINIOS shell · simulated</span></div>
-                  <div className="min-h-0 flex-1 overflow-y-auto p-4 leading-relaxed text-emerald-100/90">
+                  <div
+                    className="min-h-0 flex-1 overflow-y-auto p-4 leading-relaxed text-emerald-100/90"
+                    onClick={() => {
+                      const el = terminalInputRef.current;
+                      if (el) {
+                        el.focus();
+                        keepTerminalCursorAtEnd(el);
+                      }
+                    }}
+                  >
                     {termHistory.map((line, index) => <pre key={index} className="whitespace-pre-wrap break-words font-mono">{line || ' '}</pre>)}
                     <form onSubmit={handleTerminalSubmit} className="flex items-baseline gap-2 font-mono leading-relaxed">
                       <span className="shrink-0 whitespace-pre text-sky-300">{promptText}</span>
-                      <input autoComplete="off" spellCheck={false} value={termInput} onChange={(e) => setTermInput(e.target.value)} aria-label="Terminal command" className="min-w-0 flex-1 border-0 bg-transparent p-0 font-mono text-[11px] text-slate-100 outline-none ring-0 focus:border-0 focus:outline-none focus:ring-0" placeholder="" />
+                      <input
+                        ref={terminalInputRef}
+                        autoComplete="off"
+                        spellCheck={false}
+                        value={termInput}
+                        onChange={(e) => {
+                          setTermInput(e.target.value);
+                          requestAnimationFrame(() => keepTerminalCursorAtEnd(e.target));
+                        }}
+                        onKeyDown={(e) => {
+                          if (['ArrowLeft', 'Home', 'PageUp'].includes(e.key)) {
+                            e.preventDefault();
+                            keepTerminalCursorAtEnd(e.currentTarget);
+                          }
+                        }}
+                        onClick={(e) => keepTerminalCursorAtEnd(e.currentTarget)}
+                        onMouseUp={(e) => keepTerminalCursorAtEnd(e.currentTarget)}
+                        onSelect={(e) => keepTerminalCursorAtEnd(e.currentTarget)}
+                        aria-label="Terminal command"
+                        className="min-w-0 flex-1 border-0 bg-transparent p-0 font-mono text-[11px] text-slate-100 outline-none ring-0 focus:border-0 focus:outline-none focus:ring-0"
+                        placeholder=""
+                      />
                     </form>
                     <div ref={terminalEndRef} />
                   </div>
@@ -1358,7 +1528,15 @@ export default function App() {
                     <div className="flex items-center gap-2"><button onClick={() => beginCreateItem('file')} className="rounded-md border border-white/[0.1] bg-white/[0.055] px-2.5 py-1.5 text-[10px] text-slate-200 transition hover:bg-white/[0.1]"><FilePlus className="mr-1 inline h-3.5 w-3.5" />New file</button><button onClick={() => beginCreateItem('dir')} className="rounded-md border border-white/[0.1] bg-white/[0.055] px-2.5 py-1.5 text-[10px] text-slate-200 transition hover:bg-white/[0.1]"><FolderPlus className="mr-1 inline h-3.5 w-3.5" />New folder</button></div>
                   </div>
                   <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-white/[0.09] bg-white/[0.045] px-3 py-2.5 backdrop-blur-xl">
-                    <button onClick={goUpDirectory} disabled={isAtFileRoot} className="rounded-md p-1.5 text-slate-300 transition hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-30" title="Go to parent folder"><ArrowUp className="h-3.5 w-3.5" /></button>
+                    <button
+                      type="button"
+                      onClick={goUpDirectory}
+                      disabled={isAtFileRoot}
+                      className="flex items-center gap-1 rounded-md border border-white/[0.1] bg-white/[0.05] px-2 py-1 text-[11px] font-medium text-slate-200 transition hover:bg-white/[0.12] disabled:cursor-not-allowed disabled:opacity-30"
+                      title="Go back to parent folder (Backspace)"
+                    >
+                      <ArrowUp className="h-3.5 w-3.5" /> Back
+                    </button>
                     <Folder className="h-4 w-4 shrink-0 text-amber-200" />
                     <span className="text-[11px] text-slate-400">Location</span>
                     <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden font-mono text-[11px]">
@@ -1375,16 +1553,57 @@ export default function App() {
                     <table className="w-full min-w-[620px] text-left text-xs">
                       <thead className="bg-white/[0.055] text-[10px] uppercase tracking-[0.1em] text-slate-400"><tr>{['Name', 'Kind', 'Size', 'Modified', ''].map((item) => <th key={item} className="px-3.5 py-3 font-medium">{item}</th>)}</tr></thead>
                       <tbody className="divide-y divide-white/[0.055]">
+                        {!isAtFileRoot && (
+                          <tr
+                            onClick={goUpDirectory}
+                            className="cursor-pointer transition hover:bg-white/[0.055]"
+                            title="Go back to parent directory"
+                          >
+                            <td className="px-3.5 py-2.5">
+                              <span className="flex items-center gap-2.5 text-slate-300">
+                                <ArrowUp className="h-4 w-4 text-amber-200" />
+                                <span className="font-mono font-semibold">.. (Parent Directory)</span>
+                              </span>
+                            </td>
+                            <td className="px-3.5 py-2.5 text-slate-500">Folder</td>
+                            <td className="px-3.5 py-2.5 font-mono text-slate-500">—</td>
+                            <td className="px-3.5 py-2.5 font-mono text-slate-500">—</td>
+                            <td className="px-3.5 py-2.5" />
+                          </tr>
+                        )}
                         {visibleFiles.map((file) => {
                           const key = getFileKey(file);
                           const isSelected = selectedFileKeys.includes(key);
-                          return <tr key={key} data-file-key={key} onClick={(event) => handleFileRowClick(event, file)} onDoubleClick={() => openFileEntry(file)} onContextMenu={(event) => openFileContextMenu(event, file)} className={`cursor-default transition ${isSelected ? 'bg-sky-300/[0.16] outline outline-1 -outline-offset-1 outline-sky-200/35' : 'hover:bg-white/[0.055]'}`}>
-                            <td className="px-3.5 py-3"><span className="flex items-center gap-2.5">{file.type === 'dir' ? <Folder className="h-4 w-4 text-amber-200" /> : <FileText className="h-4 w-4 text-slate-300" />}<span className="font-medium text-slate-100">{file.name}</span></span></td>
-                            <td className="px-3.5 py-3 text-slate-400">{file.type === 'dir' ? 'Folder' : 'File'}</td>
-                            <td className="px-3.5 py-3 font-mono text-slate-400">{file.size}</td>
-                            <td className="px-3.5 py-3 font-mono text-slate-400">{file.modified}</td>
-                            <td className="px-3.5 py-3 text-right"><button onClick={(event) => { event.stopPropagation(); deleteItemRecursive(file); setToast(`Deleted ${file.name}`); }} title={`Delete ${file.name}`} className="rounded-md p-1.5 text-slate-500 transition hover:bg-rose-400/[0.1] hover:text-rose-300"><Trash2 className="h-3.5 w-3.5" /></button></td>
-                          </tr>;
+                          return (
+                            <tr
+                              key={key}
+                              data-file-key={key}
+                              onClick={(event) => handleFileRowClick(event, file)}
+                              onDoubleClick={() => openFileEntry(file)}
+                              onContextMenu={(event) => openFileContextMenu(event, file)}
+                              className={`cursor-pointer transition ${isSelected ? 'bg-sky-300/[0.16] outline outline-1 -outline-offset-1 outline-sky-200/35' : 'hover:bg-white/[0.055]'}`}
+                            >
+                              <td className="px-3.5 py-3">
+                                <span className="flex items-center gap-2.5">
+                                  {file.type === 'dir' ? <Folder className="h-4 w-4 text-amber-200" /> : <FileText className="h-4 w-4 text-sky-300" />}
+                                  <span className="font-medium text-slate-100 hover:underline">{file.name}</span>
+                                </span>
+                              </td>
+                              <td className="px-3.5 py-3 text-slate-400">{file.type === 'dir' ? 'Folder' : 'File'}</td>
+                              <td className="px-3.5 py-3 font-mono text-slate-400">{file.size}</td>
+                              <td className="px-3.5 py-3 font-mono text-slate-400">{file.modified}</td>
+                              <td className="px-3.5 py-3 text-right">
+                                <button
+                                  type="button"
+                                  onClick={(event) => { event.stopPropagation(); deleteItemRecursive(file); setToast(`Deleted ${file.name}`); }}
+                                  title={`Delete ${file.name}`}
+                                  className="rounded-md p-1.5 text-slate-500 transition hover:bg-rose-400/[0.1] hover:text-rose-300"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </td>
+                            </tr>
+                          );
                         })}
                         {!visibleFiles.length && <tr><td colSpan="5" className="py-12 text-center text-slate-500"><FolderOpen className="mx-auto mb-2 h-6 w-6 text-slate-600" />This folder is empty.<p className="mt-1 text-[10px]">Right-click and choose New to add a file or folder.</p></td></tr>}
                       </tbody>
@@ -1445,60 +1664,23 @@ export default function App() {
 
                   {memoryTab === 'paging' ? (
                     <>
-                      {/* Paging Metrics */}
                       <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-4">
-                        <StatCard
-                          label="Total Frames"
-                          value={pagingStats?.totalFrames || 64}
-                          helper={`${pagingStats?.totalMemory || 256} KB physical space`}
-                          icon={HardDrive}
-                        />
-                        <StatCard
-                          label="Allocated Frames"
-                          value={`${pagingStats?.usedFrames ?? ((pagingStats?.totalFrames || 64) - (pagingStats?.freeFrames || 64))} / ${pagingStats?.totalFrames || 64}`}
-                          helper={`${pagingStats?.freeFrames ?? 64} frames available`}
-                          icon={Activity}
-                        />
-                        <StatCard
-                          label="Page Faults"
-                          value={pagingStats?.pageFaults ?? 0}
-                          helper="Demand paging misses"
-                          icon={Zap}
-                        />
+                        <StatCard label="Total Frames" value={pagingStats?.totalFrames || 64} helper={`${pagingStats?.totalMemory || 256} KB physical space`} icon={HardDrive} />
+                        <StatCard label="Allocated Frames" value={`${pagingStats?.usedFrames ?? ((pagingStats?.totalFrames || 64) - (pagingStats?.freeFrames || 64))} / ${pagingStats?.totalFrames || 64}`} helper={`${pagingStats?.freeFrames ?? 64} frames available`} icon={Activity} />
+                        <StatCard label="Page Faults" value={pagingStats?.pageFaults ?? 0} helper="Demand paging misses" icon={Zap} />
                         <div className="flex flex-col justify-between rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
                           <div className="flex items-center justify-between">
                             <span className="text-[11px] text-slate-400">Page Policy</span>
                             <SlidersHorizontal className="h-4 w-4 text-sky-400" />
                           </div>
                           <div className="mt-2 flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => setPagePolicy('LRU')}
-                              className={`flex-1 rounded-md py-1 text-center font-mono text-xs font-semibold transition ${
-                                (pagingStats?.policy || 'LRU') === 'LRU'
-                                  ? 'bg-sky-400/20 text-sky-200 border border-sky-400/40'
-                                  : 'bg-white/[0.04] text-slate-400 hover:bg-white/[0.08]'
-                              }`}
-                            >
-                              LRU
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setPagePolicy('FIFO')}
-                              className={`flex-1 rounded-md py-1 text-center font-mono text-xs font-semibold transition ${
-                                (pagingStats?.policy || 'LRU') === 'FIFO'
-                                  ? 'bg-sky-400/20 text-sky-200 border border-sky-400/40'
-                                  : 'bg-white/[0.04] text-slate-400 hover:bg-white/[0.08]'
-                              }`}
-                            >
-                              FIFO
-                            </button>
+                            <button type="button" onClick={() => setPagePolicy('LRU')} className={`flex-1 rounded-md py-1 text-center font-mono text-xs font-semibold transition ${(pagingStats?.policy || 'LRU') === 'LRU' ? 'bg-sky-400/20 text-sky-200 border border-sky-400/40' : 'bg-white/[0.04] text-slate-400 hover:bg-white/[0.08]'}`}>LRU</button>
+                            <button type="button" onClick={() => setPagePolicy('FIFO')} className={`flex-1 rounded-md py-1 text-center font-mono text-xs font-semibold transition ${(pagingStats?.policy || 'LRU') === 'FIFO' ? 'bg-sky-400/20 text-sky-200 border border-sky-400/40' : 'bg-white/[0.04] text-slate-400 hover:bg-white/[0.08]'}`}>FIFO</button>
                           </div>
                           <span className="mt-1 text-[10px] text-slate-500">Replacement algorithm</span>
                         </div>
                       </div>
 
-                      {/* Physical Frame Map */}
                       <div className="mb-5 rounded-xl border border-white/[0.08] bg-[#101317] p-4">
                         <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
                           <div>
@@ -1509,13 +1691,7 @@ export default function App() {
                             <span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-sm bg-sky-400" />Allocated</span>
                             <span className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-sm bg-slate-700" />Free</span>
                             {selectedPagingPID !== 'ALL' && (
-                              <button
-                                type="button"
-                                onClick={() => setSelectedPagingPID('ALL')}
-                                className="rounded bg-white/[0.08] px-2 py-0.5 text-slate-300 hover:bg-white/[0.15]"
-                              >
-                                Clear Filter
-                              </button>
+                              <button type="button" onClick={() => setSelectedPagingPID('ALL')} className="rounded bg-white/[0.08] px-2 py-0.5 text-slate-300 hover:bg-white/[0.15]">Clear Filter</button>
                             )}
                           </div>
                         </div>
@@ -1533,14 +1709,8 @@ export default function App() {
                               <button
                                 key={frame.frameId}
                                 type="button"
-                                onClick={() => {
-                                  if (frame.processPID) setSelectedPagingPID(frame.processPID);
-                                }}
-                                title={
-                                  isAlloc
-                                    ? `Frame #${frame.frameId}: Process ${frame.processPID} (Page ${frame.pageNumber})`
-                                    : `Frame #${frame.frameId}: Free`
-                                }
+                                onClick={() => { if (frame.processPID) setSelectedPagingPID(frame.processPID); }}
+                                title={isAlloc ? `Frame #${frame.frameId}: Process ${frame.processPID} (Page ${frame.pageNumber})` : `Frame #${frame.frameId}: Free`}
                                 className={`group relative flex aspect-square flex-col items-center justify-center rounded-md border text-[10px] font-mono transition duration-150 ${
                                   isAlloc
                                     ? isSelectedProc
@@ -1550,18 +1720,13 @@ export default function App() {
                                 }`}
                               >
                                 <span className="text-[9px] font-semibold">{frame.frameId}</span>
-                                {isAlloc && (
-                                  <span className="mt-0.5 scale-90 truncate font-mono text-[8px] font-bold tracking-tighter opacity-90">
-                                    {frame.processPID}
-                                  </span>
-                                )}
+                                {isAlloc && <span className="mt-0.5 scale-90 truncate font-mono text-[8px] font-bold tracking-tighter opacity-90">{frame.processPID}</span>}
                               </button>
                             );
                           })}
                         </div>
                       </div>
 
-                      {/* Process Page Tables Viewer & Live Address Translation Tester */}
                       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
                         <div className="rounded-xl border border-white/[0.08] bg-[#101317] p-4 lg:col-span-2">
                           <div className="mb-3 flex items-center justify-between">
@@ -1571,18 +1736,11 @@ export default function App() {
                             </div>
                             <div className="flex items-center gap-1.5">
                               <span className="text-[10px] text-slate-400">Filter:</span>
-                              <select
-                                value={selectedPagingPID}
-                                onChange={(e) => setSelectedPagingPID(e.target.value)}
-                                className="rounded border border-white/[0.1] bg-white/[0.04] px-2 py-1 text-[11px] text-slate-200 outline-none"
-                              >
+                              <select value={selectedPagingPID} onChange={(e) => setSelectedPagingPID(e.target.value)} className="rounded border border-white/[0.1] bg-white/[0.04] px-2 py-1 text-[11px] text-slate-200 outline-none">
                                 <option value="ALL">All Processes</option>
-                                {pagingStats?.pageTables &&
-                                  Object.keys(pagingStats.pageTables).map((pid) => (
-                                    <option key={pid} value={pid}>
-                                      Process {pid}
-                                    </option>
-                                  ))}
+                                {pagingStats?.pageTables && Object.keys(pagingStats.pageTables).map((pid) => (
+                                  <option key={pid} value={pid}>Process {pid}</option>
+                                ))}
                               </select>
                             </div>
                           </div>
@@ -1607,14 +1765,7 @@ export default function App() {
                                       </div>
                                       <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4 md:grid-cols-6">
                                         {entries.map((entry) => (
-                                          <div
-                                            key={entry.pageNumber}
-                                            className={`rounded-md border p-1.5 text-center font-mono text-[10px] ${
-                                              entry.valid
-                                                ? 'border-emerald-400/25 bg-emerald-400/[0.08] text-emerald-200'
-                                                : 'border-rose-400/20 bg-rose-400/[0.05] text-rose-300'
-                                            }`}
-                                          >
+                                          <div key={entry.pageNumber} className={`rounded-md border p-1.5 text-center font-mono text-[10px] ${entry.valid ? 'border-emerald-400/25 bg-emerald-400/[0.08] text-emerald-200' : 'border-rose-400/20 bg-rose-400/[0.05] text-rose-300'}`}>
                                             <div className="text-[9px] text-slate-400">Page {entry.pageNumber}</div>
                                             <div className="font-semibold">{entry.valid ? `Frame ${entry.frameNumber}` : 'Swapped'}</div>
                                             <div className="text-[8px] text-slate-500">t={entry.lastAccessTime}</div>
@@ -1632,7 +1783,6 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Interactive Memory Access Tester */}
                         <div className="flex flex-col justify-between rounded-xl border border-white/[0.08] bg-[#101317] p-4">
                           <div>
                             <div className="mb-2 flex items-center gap-2">
@@ -1653,9 +1803,7 @@ export default function App() {
                                 >
                                   {pagingStats?.pageTables && Object.keys(pagingStats.pageTables).length > 0 ? (
                                     Object.keys(pagingStats.pageTables).map((pid) => (
-                                      <option key={pid} value={pid}>
-                                        Process {pid}
-                                      </option>
+                                      <option key={pid} value={pid}>Process {pid}</option>
                                     ))
                                   ) : (
                                     <option value="">No active process</option>
@@ -1665,14 +1813,7 @@ export default function App() {
 
                               <label className="block">
                                 <span className="mb-1 block text-[10px] text-slate-400">Logical Address (offset)</span>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  value={testLogicalAddr}
-                                  onChange={(e) => setTestLogicalAddr(e.target.value)}
-                                  className="field w-full text-xs"
-                                  placeholder="e.g. 0, 4, 8"
-                                />
+                                <input type="number" min="0" value={testLogicalAddr} onChange={(e) => setTestLogicalAddr(e.target.value)} className="field w-full text-xs" placeholder="e.g. 0, 4, 8" />
                               </label>
                             </div>
                           </div>
@@ -1694,26 +1835,10 @@ export default function App() {
                     </>
                   ) : (
                     <>
-                      {/* Contiguous Partitions View */}
                       <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-4">
-                        <StatCard
-                          label="Physical RAM"
-                          value={`${memoryStats?.totalMemory || 100} MB`}
-                          helper="Simulated capacity"
-                          icon={HardDrive}
-                        />
-                        <StatCard
-                          label="Allocated Space"
-                          value={`${memoryStats?.usedMemory || 0} MB`}
-                          helper={`${memoryStats?.freeMemory || 100} MB free`}
-                          icon={Activity}
-                        />
-                        <StatCard
-                          label="External Fragmentation"
-                          value={`${Number(memoryStats?.externalFragmentation || 0).toFixed(1)}%`}
-                          helper="Scattered free space"
-                          icon={SlidersHorizontal}
-                        />
+                        <StatCard label="Physical RAM" value={`${memoryStats?.totalMemory || 100} MB`} helper="Simulated capacity" icon={HardDrive} />
+                        <StatCard label="Allocated Space" value={`${memoryStats?.usedMemory || 0} MB`} helper={`${memoryStats?.freeMemory || 100} MB free`} icon={Activity} />
+                        <StatCard label="External Fragmentation" value={`${Number(memoryStats?.externalFragmentation || 0).toFixed(1)}%`} helper="Scattered free space" icon={SlidersHorizontal} />
                         <div className="flex flex-col justify-between rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
                           <div className="flex items-center justify-between">
                             <span className="text-[11px] text-slate-400">Partition Allocator</span>
@@ -1739,24 +1864,18 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Memory Layout Partition Bar */}
                       <div className="mb-5 rounded-xl border border-white/[0.08] bg-[#101317] p-4">
                         <div className="mb-3 flex items-center justify-between">
                           <div>
                             <h3 className="text-xs font-semibold text-slate-200">Continuous Memory Address Space (0 – {memoryStats?.totalMemory || 100} MB)</h3>
                             <p className="text-[10px] text-slate-500">Partition layout with real-time process block placement</p>
                           </div>
-                          <button
-                            type="button"
-                            onClick={compactMemory}
-                            className="flex items-center gap-1.5 rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-xs font-medium text-emerald-200 transition hover:bg-emerald-400/20"
-                          >
+                          <button type="button" onClick={compactMemory} className="flex items-center gap-1.5 rounded-lg border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-xs font-medium text-emerald-200 transition hover:bg-emerald-400/20">
                             <Minimize2 className="h-3.5 w-3.5" />
                             Compact RAM (Defragment)
                           </button>
                         </div>
 
-                        {/* Visual Bar */}
                         <div className="mb-4 flex h-10 w-full overflow-hidden rounded-lg border border-white/[0.1] bg-black/40">
                           {memoryStats?.blocks && memoryStats.blocks.length > 0 ? (
                             memoryStats.blocks.map((block, idx) => {
@@ -1766,31 +1885,20 @@ export default function App() {
                                 <div
                                   key={idx}
                                   style={{ width: `${pct}%` }}
-                                  title={
-                                    block.isFree
-                                      ? `Free Block: ${block.size} MB (${block.start} - ${block.end})`
-                                      : `Process ${block.processPID}: ${block.size} MB (${block.start} - ${block.end})`
-                                  }
+                                  title={block.isFree ? `Free Block: ${block.size} MB (${block.start} - ${block.end})` : `Process ${block.processPID}: ${block.size} MB (${block.start} - ${block.end})`}
                                   className={`relative flex h-full items-center justify-center border-r border-black/50 text-[10px] font-mono font-medium transition ${
-                                    block.isFree
-                                      ? 'bg-slate-800/40 text-slate-500'
-                                      : `${color.bg} ${color.text} font-semibold`
+                                    block.isFree ? 'bg-slate-800/40 text-slate-500' : `${color.bg} ${color.text} font-semibold`
                                   }`}
                                 >
-                                  <span className="truncate px-1">
-                                    {block.isFree ? `Free ${block.size}M` : `${block.processPID} (${block.size}M)`}
-                                  </span>
+                                  <span className="truncate px-1">{block.isFree ? `Free ${block.size}M` : `${block.processPID} (${block.size}M)`}</span>
                                 </div>
                               );
                             })
                           ) : (
-                            <div className="flex h-full w-full items-center justify-center text-xs text-slate-500">
-                              Free Memory (100 MB)
-                            </div>
+                            <div className="flex h-full w-full items-center justify-center text-xs text-slate-500">Free Memory (100 MB)</div>
                           )}
                         </div>
 
-                        {/* Partition Blocks Table */}
                         <div className="overflow-x-auto">
                           <table className="w-full text-left font-mono text-[11px]">
                             <thead className="border-b border-white/[0.08] text-[10px] uppercase text-slate-500">
@@ -1811,24 +1919,14 @@ export default function App() {
                                     <td className="py-2 text-slate-200">{block.size} MB</td>
                                     <td className="py-2">{block.processPID || '—'}</td>
                                     <td className="py-2 text-right">
-                                      <span
-                                        className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                                          block.isFree
-                                            ? 'bg-slate-700/40 text-slate-400'
-                                            : 'bg-emerald-400/15 text-emerald-300 border border-emerald-400/30'
-                                        }`}
-                                      >
+                                      <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${block.isFree ? 'bg-slate-700/40 text-slate-400' : 'bg-emerald-400/15 text-emerald-300 border border-emerald-400/30'}`}>
                                         {block.isFree ? 'FREE' : 'OCCUPIED'}
                                       </span>
                                     </td>
                                   </tr>
                                 ))
                               ) : (
-                                <tr>
-                                  <td colSpan="5" className="py-4 text-center text-slate-500">
-                                    No partition data available.
-                                  </td>
-                                </tr>
+                                <tr><td colSpan="5" className="py-4 text-center text-slate-500">No partition data available.</td></tr>
                               )}
                             </tbody>
                           </table>
@@ -1843,7 +1941,7 @@ export default function App() {
                 <div>
                   <SectionHeading eyebrow="System / Telemetry" title="System monitor" description="Values below are generated by this OS simulation; they do not measure the host computer." icon={Monitor} action={<span className="rounded-md border border-white/[0.08] px-2.5 py-1.5 text-[10px] text-slate-500">Demo telemetry</span>} />
                   <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3"><StatCard label="Runnable processes" value={activeProcesses} helper="READY or RUNNING" icon={Cpu} /><StatCard label="Process table" value={processes.length} helper="All states, including terminated" icon={Activity} /><StatCard label="System state" value="Stable" helper="No simulated alerts" icon={ShieldCheck} /></div>
-                  <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4"><h3 className="mb-4 text-xs font-semibold text-slate-300">Process distribution</h3>{['RUNNING', 'READY', 'BLOCKED', 'TERMINATED'].map((state) => { const count = processes.filter((p) => p.state === state).length; const pct = processes.length ? (count / processes.length) * 100 : 0; return <div key={state} className="mb-4 last:mb-0"><div className="mb-2 flex justify-between text-[11px]"><span className="text-slate-400">{state}</span><span className="font-mono text-slate-300">{count}</span></div><div className="h-1.5 overflow-hidden rounded-full bg-white/[0.06]"><div style={{ width: `${pct}%` }} className={`h-full rounded-full ${state === 'RUNNING' ? 'bg-emerald-300/70' : state === 'READY' ? 'bg-amber-200/70' : state === 'BLOCKED' ? 'bg-rose-300/60' : 'bg-slate-500/70'}`} /></div></div>; })}</div>
+                  <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4"><h3 className="mb-4 text-xs font-semibold text-slate-300">Process distribution</h3>{['RUNNING', 'READY', 'NEW', 'BLOCKED', 'TERMINATED'].map((state) => { const count = processes.filter((p) => p.state === state).length; const pct = processes.length ? (count / processes.length) * 100 : 0; return <div key={state} className="mb-4 last:mb-0"><div className="mb-2 flex justify-between text-[11px]"><span className="text-slate-400">{state}</span><span className="font-mono text-slate-300">{count}</span></div><div className="h-1.5 overflow-hidden rounded-full bg-white/[0.06]"><div style={{ width: `${pct}%` }} className={`h-full rounded-full ${state === 'RUNNING' ? 'bg-emerald-300/70' : state === 'READY' ? 'bg-amber-200/70' : state === 'NEW' ? 'bg-sky-300/70' : state === 'BLOCKED' ? 'bg-rose-300/60' : 'bg-slate-500/70'}`} /></div></div>; })}</div>
                 </div>
               )}
 
@@ -1851,6 +1949,33 @@ export default function App() {
                 <div>
                   <SectionHeading eyebrow="Personalization" title="Settings" description="Adjust the desktop's appearance and application dock." icon={Settings} />
                   <div className="space-y-4">
+                    <section className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                      <div className="mb-4 flex items-start gap-3"><div className="rounded-lg border border-white/[0.08] bg-white/[0.04] p-2 text-slate-300"><LayoutGrid className="h-4 w-4" /></div><div><h3 className="text-xs font-semibold text-slate-200">Pinned dock applications</h3><p className="mt-1 text-[11px] leading-5 text-slate-500">Pin or unpin apps from your desktop dock (or right-click any dock icon).</p></div></div>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        {INITIAL_APPS.filter((a) => a.id !== 'settings').map((app) => {
+                          const isPinned = pinnedApps.includes(app.id);
+                          return (
+                            <div key={app.id} className="flex items-center justify-between rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2">
+                              <div className="flex items-center gap-2.5">
+                                <span className={`flex h-7 w-7 items-center justify-center rounded-md border ${APP_TONES[app.id]}`}><AppIcon app={app} size="sm" /></span>
+                                <span className="text-xs font-medium text-slate-200">{app.title}</span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => togglePinnedApp(app.id)}
+                                className={`rounded-md border px-2.5 py-1 text-[10px] font-medium transition ${
+                                  isPinned
+                                    ? 'border-rose-400/30 bg-rose-500/10 text-rose-200 hover:bg-rose-500/20'
+                                    : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20'
+                                }`}
+                              >
+                                {isPinned ? 'Unpin from dock' : 'Pin to dock'}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </section>
                     <section className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
                       <div className="mb-4 flex items-start gap-3"><div className="rounded-lg border border-white/[0.08] bg-white/[0.04] p-2 text-slate-300"><SlidersHorizontal className="h-4 w-4" /></div><div><h3 className="text-xs font-semibold text-slate-200">Dock icon size</h3><p className="mt-1 text-[11px] leading-5 text-slate-500">Change the size of app icons in the desktop dock.</p></div></div>
                       <div className="grid grid-cols-3 gap-2">{[{ id: 'sm', label: 'Compact', detail: 'Small icons' }, { id: 'md', label: 'Standard', detail: 'Default size' }, { id: 'lg', label: 'Large', detail: 'Larger icons' }].map((option) => <button key={option.id} onClick={() => setIconSize(option.id)} className={`rounded-lg border p-3 text-left transition ${iconSize === option.id ? 'border-slate-300/30 bg-white/[0.075]' : 'border-white/[0.07] bg-transparent hover:bg-white/[0.035]'}`}><span className="mb-3 flex h-8 items-center gap-1.5">{[0, 1, 2].map((n) => <span key={n} className={`block rounded-md border border-white/[0.08] bg-slate-300/10 ${option.id === 'sm' ? 'h-5 w-5' : option.id === 'lg' ? 'h-7 w-7' : 'h-6 w-6'}`} />)}</span><span className="block text-xs font-medium text-slate-200">{option.label}</span><span className="mt-1 block text-[10px] text-slate-500">{option.detail}</span>{iconSize === option.id && <Check className="mt-2 h-3.5 w-3.5 text-emerald-300" />}</button>)}</div>
@@ -1872,7 +1997,16 @@ export default function App() {
                       </div>
                       <p className="mt-3 text-[10px] leading-5 text-slate-500">Images apply to this browser session and are not uploaded to a server.</p>
                     </section>
-                    <section className="flex items-center justify-between gap-4 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4"><div><h3 className="text-xs font-semibold text-slate-200">About MINIOS</h3><p className="mt-1 text-[11px] text-slate-500">Desktop operating-system simulator ·</p></div><span className="rounded-md border border-white/[0.08] px-2.5 py-1.5 font-mono text-[10px] text-slate-400">v1.0.0</span></section>
+                    <section className="flex items-center justify-between gap-4 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                      <div className="flex items-center gap-3">
+                        {!logoError && <img src="/logo.png" alt="MiniOS" className="h-8 w-8 rounded-lg object-cover" onError={() => setLogoError(true)} />}
+                        <div>
+                          <h3 className="text-xs font-semibold text-slate-200">About MINIOS</h3>
+                          <p className="mt-1 text-[11px] text-slate-500">Desktop operating-system simulator</p>
+                        </div>
+                      </div>
+                      <span className="rounded-md border border-white/[0.08] px-2.5 py-1.5 font-mono text-[10px] text-slate-400">v1.0.0</span>
+                    </section>
                   </div>
                 </div>
               )}
@@ -1885,7 +2019,14 @@ export default function App() {
         <div className="absolute inset-0 z-[210] overflow-y-auto bg-[#111827]/62 backdrop-blur-2xl" onMouseDown={(event) => { if (event.target === event.currentTarget) setAppLauncherOpen(false); }}>
           <div className="mx-auto flex min-h-full w-full max-w-6xl flex-col px-6 pb-10 pt-7 sm:px-10">
             <div className="mb-6 flex items-start justify-between gap-4">
-              <div><p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-sky-200/80">MINIOS overview</p><h2 className="mt-1 text-xl font-semibold tracking-tight text-white">What would you like to open?</h2><p className="mt-1 text-xs text-slate-300/75">Search applications or jump back to an open window.</p></div>
+              <div className="flex items-center gap-3">
+                {!logoError && <img src="/logo.png" alt="MiniOS" className="h-10 w-10 rounded-xl object-cover shadow-md" onError={() => setLogoError(true)} />}
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-sky-200/80">MINIOS overview</p>
+                  <h2 className="mt-1 text-xl font-semibold tracking-tight text-white">What would you like to open?</h2>
+                  <p className="mt-1 text-xs text-slate-300/75">Search applications or jump back to an open window.</p>
+                </div>
+              </div>
               <button onClick={() => setAppLauncherOpen(false)} aria-label="Close overview" title="Close overview (Esc)" className="rounded-lg border border-white/[0.14] bg-white/[0.07] p-2 text-slate-200 transition hover:bg-white/[0.13]"><X className="h-4 w-4" /></button>
             </div>
             <div className="mx-auto w-full max-w-2xl">
@@ -1908,16 +2049,40 @@ export default function App() {
 
             <section className="mt-9">
               <div className="mb-4 flex items-center justify-between"><h3 className="text-xs font-semibold uppercase tracking-[0.13em] text-slate-200">Applications</h3><span className="text-[10px] text-slate-400">{filteredApps.length} available</span></div>
-              {filteredApps.length ? <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">{filteredApps.map((app) => <button key={app.id} onClick={() => openWindow(app.id)} onContextMenu={(event) => { if (app.id !== 'settings') openDockContextMenu(event, app.id); else event.preventDefault(); }} className="group flex items-center gap-3 rounded-xl border border-white/[0.09] bg-white/[0.045] p-3 text-left backdrop-blur-lg transition duration-200 hover:-translate-y-0.5 hover:border-white/[0.17] hover:bg-white/[0.095]">
-                <span className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border ${APP_TONES[app.id]} transition duration-200 group-hover:scale-105`}><AppIcon app={app} size="md" /></span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-semibold text-slate-100">{app.title}</span><span className="mt-1 block truncate text-[10px] text-slate-400">{app.subtitle}</span></span><ChevronDown className="h-3.5 w-3.5 -rotate-90 text-slate-500 transition group-hover:translate-x-0.5 group-hover:text-slate-200" />
-              </button>)}</div> : <p className="rounded-xl border border-dashed border-white/[0.15] px-4 py-7 text-center text-xs text-slate-400">No applications found.</p>}
+              {filteredApps.length ? <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">{filteredApps.map((app) => {
+                const isPinned = pinnedApps.includes(app.id);
+                return (
+                  <div key={app.id} onContextMenu={(event) => { if (app.id !== 'settings') openDockContextMenu(event, app.id); else event.preventDefault(); }} className="group flex items-center gap-3 rounded-xl border border-white/[0.09] bg-white/[0.045] p-3 text-left backdrop-blur-lg transition duration-200 hover:border-white/[0.17] hover:bg-white/[0.095]">
+                    <button type="button" onClick={() => openWindow(app.id)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+                      <span className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border ${APP_TONES[app.id]} transition duration-200 group-hover:scale-105`}><AppIcon app={app} size="md" /></span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-xs font-semibold text-slate-100">{app.title}</span>
+                        <span className="mt-1 block truncate text-[10px] text-slate-400">{app.subtitle}</span>
+                      </span>
+                    </button>
+                    {app.id !== 'settings' && (
+                      <button
+                        type="button"
+                        onClick={(event) => { event.stopPropagation(); togglePinnedApp(app.id); }}
+                        className={`shrink-0 rounded-md border px-2 py-1 text-[10px] font-medium transition ${
+                          isPinned
+                            ? 'border-white/[0.14] bg-white/[0.06] text-slate-300 hover:border-rose-400/30 hover:bg-rose-500/15 hover:text-rose-200'
+                            : 'border-sky-400/30 bg-sky-500/15 text-sky-200 hover:bg-sky-500/25'
+                        }`}
+                      >
+                        {isPinned ? 'Unpin' : 'Pin'}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}</div> : <p className="rounded-xl border border-dashed border-white/[0.15] px-4 py-7 text-center text-xs text-slate-400">No applications found.</p>}
             </section>
           </div>
         </div>
       )}
 
       {contextMenu && (
-        <div className="fixed z-[200] w-52 overflow-visible rounded-xl border border-white/[0.15] bg-[#242a34]/95 p-1.5 shadow-[0_18px_60px_rgba(0,0,0,0.45)] backdrop-blur-2xl" style={{ left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 220)), top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 310)) }} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+        <div className="fixed z-[300] w-52 overflow-visible rounded-xl border border-white/[0.15] bg-[#242a34]/95 p-1.5 shadow-[0_18px_60px_rgba(0,0,0,0.45)] backdrop-blur-2xl" style={{ left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 220)), top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 310)) }} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
           <button onClick={() => setContextNewOpen((open) => !open)} className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs text-slate-100 transition hover:bg-white/[0.09]"><span><Plus className="mr-2 inline h-3.5 w-3.5" />New</span><ChevronDown className={`h-3.5 w-3.5 -rotate-90 transition ${contextNewOpen ? 'rotate-0' : ''}`} /></button>
           {contextNewOpen && <div className="mb-1 ml-2 border-l border-white/[0.12] pl-2"><button onClick={() => beginCreateItem('dir')} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/[0.09]"><FolderPlus className="h-3.5 w-3.5 text-amber-200" />Folder</button><button onClick={() => beginCreateItem('file')} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/[0.09]"><FilePlus className="h-3.5 w-3.5 text-sky-200" />File</button></div>}
           {contextMenu.selectedKeys?.length > 0 && <>
@@ -1928,7 +2093,7 @@ export default function App() {
               const entry = visibleFiles.find((item) => item.id === contextMenu.selectedKeys[0]);
               if (!entry) return null;
               return <>
-                {entry.type === 'file' && <button onClick={() => { setContextMenu(null); openFileEntry(entry); }} className="w-full rounded-lg px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/[0.09]">Open</button>}
+                <button onClick={() => { setContextMenu(null); openFileEntry(entry); }} className="w-full rounded-lg px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/[0.09]">{entry.type === 'dir' ? 'Open folder' : 'Open in Text Editor'}</button>
                 <button onClick={() => beginRename(entry)} className="w-full rounded-lg px-3 py-2 text-left text-xs text-slate-200 transition hover:bg-white/[0.09]">Rename <span className="float-right text-[10px] text-slate-500">F2</span></button>
               </>;
             })()}
@@ -1946,11 +2111,37 @@ export default function App() {
       {dockContextMenu && (() => {
         const pinned = pinnedApps.includes(dockContextMenu.appId);
         const app = INITIAL_APPS.find((item) => item.id === dockContextMenu.appId);
-        return <div className="fixed z-[200] w-48 rounded-xl border border-white/[0.15] bg-[#242a34]/95 p-1.5 shadow-[0_18px_60px_rgba(0,0,0,0.45)] backdrop-blur-2xl" style={{ left: Math.max(8, Math.min(dockContextMenu.x, window.innerWidth - 205)), top: Math.max(8, Math.min(dockContextMenu.y, window.innerHeight - 120)) }} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
-          <div className="px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">{app?.title || 'Application'}</div>
-          <button onClick={() => togglePinnedApp(dockContextMenu.appId)} className="w-full rounded-lg px-3 py-2.5 text-left text-xs text-slate-100 transition hover:bg-white/[0.09]">{pinned ? 'Unpin from dock' : 'Pin to dock'}</button>
-          {!pinned && windows.some((win) => win.id === dockContextMenu.appId && win.isOpen) && <button onClick={() => { setWindows((previous) => previous.map((win) => win.id === dockContextMenu.appId ? { ...win, isOpen: false, isMinimized: false } : win)); setDockContextMenu(null); setToast('Application window closed.'); }} className="w-full rounded-lg px-3 py-2 text-left text-xs text-slate-300 transition hover:bg-white/[0.09]">Close window</button>}
-        </div>;
+        const isOpen = windows.some((win) => win.id === dockContextMenu.appId && win.isOpen);
+        return (
+          <div
+            className="fixed z-[300] w-48 rounded-xl border border-white/[0.15] bg-[#242a34]/95 p-1.5 shadow-[0_18px_60px_rgba(0,0,0,0.45)] backdrop-blur-2xl"
+            style={{ left: Math.max(8, Math.min(dockContextMenu.x, window.innerWidth - 205)), top: Math.max(8, Math.min(dockContextMenu.y, window.innerHeight - 140)) }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">{app?.title || 'Application'}</div>
+            <button
+              type="button"
+              onClick={() => togglePinnedApp(dockContextMenu.appId)}
+              className="w-full rounded-lg px-3 py-2.5 text-left text-xs text-slate-100 transition hover:bg-white/[0.09]"
+            >
+              {pinned ? 'Unpin from dock' : 'Pin to dock'}
+            </button>
+            {isOpen && (
+              <button
+                type="button"
+                onClick={() => {
+                  setWindows((previous) => previous.map((win) => win.id === dockContextMenu.appId ? { ...win, isOpen: false, isMinimized: false } : win));
+                  setDockContextMenu(null);
+                  setToast('Application window closed.');
+                }}
+                className="w-full rounded-lg px-3 py-2 text-left text-xs text-rose-200 transition hover:bg-rose-500/15"
+              >
+                Close window
+              </button>
+            )}
+          </div>
+        );
       })()}
 
       {dockTooltip && !dockContextMenu && !contextMenu && <div className="pointer-events-none fixed z-[200] whitespace-nowrap rounded-md border border-white/15 bg-[#11151d]/95 px-2.5 py-1.5 text-[11px] text-white shadow-xl backdrop-blur-xl" style={{ left: dockTooltip.x, top: dockTooltip.y, transform: dockTooltip.placement === 'top' ? 'translate(-50%, -100%)' : dockTooltip.placement === 'left' ? 'translate(-100%, -50%)' : 'translateY(-50%)' }}>{dockTooltip.title}</div>}

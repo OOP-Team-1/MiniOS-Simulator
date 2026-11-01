@@ -426,7 +426,15 @@ bool SimulationEngine::killProcess(const std::string& pid)
 {
     Process* p = processManager.getProcess(pid);
     if (!p) return false;
+    while (p->getRemainingTime() > 0 && p->getState() != "TERMINATED")
+    {
+        p->execute(p->getRemainingTime());
+    }
     p->setState(ProcessState::TERMINATED);
+    if (lastExecutedPID == pid)
+    {
+        lastExecutedPID = "IDLE";
+    }
     memoryManager->deallocate(pid);
     if (pagingManager)
     {

@@ -1,26 +1,6 @@
 import { getLatestTelemetry, sendCommand } from './processManager.js';
 import { startAutoStep, stopAutoStep } from '../sockets/simulationClock.js';
 
-// ---------------------------------------------------------------------------
-// Kernel command bridge
-//
-// The desktop terminal speaks two languages:
-//   * filesystem commands (ls, cd, mkdir, cat, ...), which the C++ CommandPrompt
-//     owns and which are forwarded as `SHELL <b64cmd>`;
-//   * kernel/process commands (ps, mem, spawn, kill, step, run, pause, reset),
-//     which the simulator's operating-system layer owns.
-//
-// CommandPrompt deliberately does not implement the kernel verbs, so we
-// intercept them here and translate them onto the existing engine protocol
-// commands (ADD/KILL/STEP/RESET) plus the backend auto-step clock — exactly the
-// same protocol the GUI's socket handlers already use. Everything else returns
-// { handled: false } and is forwarded to the real shell.
-//
-// `ps`/`mem` render from the most recent telemetry snapshot. Mutation commands
-// are acknowledged immediately; the authoritative state update arrives moments
-// later through the normal telemetry stream.
-// ---------------------------------------------------------------------------
-
 function padEnd(value, width) {
     const s = String(value ?? '');
     return s.length >= width ? s : s + ' '.repeat(width - s.length);
@@ -29,7 +9,7 @@ function padEnd(value, width) {
 function formatProcessTable(telemetry) {
     const procs = telemetry?.processes || [];
     if (!procs.length) {
-        return 'No processes running.\n';
+        return 'No processes in the process table.\n';
     }
 
     let out = padEnd('PID', 8) + padEnd('NAME', 16) + padEnd('STATE', 12)
@@ -37,9 +17,11 @@ function formatProcessTable(telemetry) {
         + padEnd('REM', 5) + 'MEM\n';
 
     for (const p of procs) {
-        out += padEnd(p.pid, 8) + padEnd(p.name, 16) + padEnd(p.state, 12)
+        const state = String(p.state ?? 'READY').toUpperCase();
+        const rem = state === 'TERMINATED' ? 0 : (p.remainingTime ?? p.remaining ?? 0);
+        out += padEnd(p.pid, 8) + padEnd(p.name, 16) + padEnd(state, 12)
             + padEnd(p.priority, 5) + padEnd(p.arrivalTime, 5)
-            + padEnd(p.burstTime, 7) + padEnd(p.remainingTime, 5)
+            + padEnd(p.burstTime, 7) + padEnd(rem, 5)
             + String(p.memoryRequired ?? 0) + '\n';
     }
     return out;
@@ -55,17 +37,14 @@ function formatMemory(telemetry) {
 }
 
 const KERNEL_VERBS = new Set([
-    'ps', 'top', 'mem', 'free', 'spawn', 'kill', 'step', 'tick', 'run', 'pause', 'reset'
+    'ps', 'top', 'mem', 'free', 'spawn', 'kill', 'remove', 'rmproc', 'step', 'tick', 'run', 'pause', 'reset'
 ]);
 
-// Returns true when the first token names a kernel command.
 export function isKernelCommand(commandLine) {
     const first = String(commandLine ?? '').trim().split(/\s+/)[0]?.toLowerCase();
     return KERNEL_VERBS.has(first);
 }
 
-// Returns { handled: boolean, output?: string }. When `handled` is false the
-// caller should forward the raw line to the engine's SHELL command.
 export function handleKernelCommand(commandLine) {
     const line = String(commandLine ?? '').trim();
     if (!line) return { handled: false };
@@ -77,7 +56,6 @@ export function handleKernelCommand(commandLine) {
     switch (cmd) {
         case 'ps':
         case 'top': {
-            // Refresh so a repeat `ps` reflects process changes promptly.
             sendCommand('STATE');
             return { handled: true, output: formatProcessTable(getLatestTelemetry()) };
         }
@@ -111,7 +89,18 @@ export function handleKernelCommand(commandLine) {
                 return { handled: true, output: 'kill: usage: kill <pid>\n' };
             }
             sendCommand(`KILL ${pid}`);
-            return { handled: true, output: `Sent KILL to ${pid}.\n` };
+            return { handled: true, output: `Terminated process ${pid}.\n` };
+        }
+
+        case 'remove':
+        case 'rmproc': {
+            const pid = String(tokens[1] ?? '').replace(/[^a-zA-Z0-9_-]/g, '');
+            if (!pid) {
+                return { handled: true, output: 'remove: usage: remove <pid>\n' };
+            }
+            sendCommand(`KILL ${pid}`);
+            sendCommand(`REMOVE ${pid}`);
+            return { handled: true, output: `Removed process ${pid} from process table.\n` };
         }
 
         case 'step':

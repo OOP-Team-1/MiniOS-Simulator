@@ -3,9 +3,6 @@ import { AlertTriangle, ArrowRight, Lock, Monitor, ShieldCheck, User, UserPlus, 
 import { accountExists, listKnownUsers, loginAccount, registerAccount } from '../lib/accountStore';
 import { userKey } from '../lib/user';
 
-// First-run / login gate. The simulator's home screen is only reachable once an
-// account has been authenticated; the session itself is intentionally kept in
-// React state only (see App.jsx), so a page refresh always returns here.
 export default function AuthScreen({ onAuthenticated }) {
     const knownUsers = useMemo(() => listKnownUsers(), []);
     const [mode, setMode] = useState(knownUsers.length ? 'login' : 'register');
@@ -14,6 +11,7 @@ export default function AuthScreen({ onAuthenticated }) {
     const [confirm, setConfirm] = useState('');
     const [error, setError] = useState('');
     const [busy, setBusy] = useState(false);
+    const [logoError, setLogoError] = useState(false);
 
     const submit = async (event) => {
         event.preventDefault();
@@ -62,8 +60,12 @@ export default function AuthScreen({ onAuthenticated }) {
 
             <div className="relative z-10 w-full max-w-md rounded-2xl border border-white/[0.18] bg-white/[0.08] p-7 shadow-[0_40px_120px_rgba(0,0,0,0.6)] ring-1 ring-white/[0.1] backdrop-blur-xl">
                 <div className="mb-6 flex items-center gap-3">
-                    <span className="flex h-11 w-11 items-center justify-center rounded-xl border border-white/[0.14] bg-white/[0.08] text-sky-200">
-                        <Monitor className="h-6 w-6" strokeWidth={1.7} />
+                    <span className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-xl border border-white/[0.14] bg-white/[0.08] text-sky-200">
+                        {!logoError ? (
+                            <img src="/logo.png" alt="MiniOS Logo" className="h-full w-full object-cover" onError={() => setLogoError(true)} />
+                        ) : (
+                            <Monitor className="h-6 w-6" strokeWidth={1.7} />
+                        )}
                     </span>
                     <div>
                         <h1 className="text-lg font-semibold tracking-tight text-white">MINIOS</h1>

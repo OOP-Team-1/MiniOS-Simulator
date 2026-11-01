@@ -4,9 +4,9 @@
   "description": "",
   "main": "src/index.js",
   "scripts": {
-    "build:engine": "cd ../engine && cmake -B build && cmake --build build",
+    "build:engine": "node ../build.js",
     "prestart": "npm run build:engine",
-    "start": "node --env-file=.env src/index.js"
+    "start": "node --env-file-if-exists=.env src/index.js"
   },
   "keywords": [],
   "author": "",

@@ -6,10 +6,6 @@
 #include <algorithm>
 #include <ctime>
 
-// ============================================================
-// CONSTRUCTOR & INITIAL DIRECTORY SETUP
-// ============================================================
-
 CommandPrompt::CommandPrompt(const std::string& user, const std::string& host, FileSystem* fileSystem)
     : username(user), hostname(host), fs(fileSystem)
 {
@@ -18,36 +14,22 @@ CommandPrompt::CommandPrompt(const std::string& user, const std::string& host, F
 
 CommandPrompt::~CommandPrompt() {}
 
-// ============================================================
-// HOME DIRECTORY ATTACHMENT & DEFAULT FILESYSTEM INITIALIZATION
-// ============================================================
-//
-// This constructor intentionally does NOT populate default folders or sample
-// files: the filesystem may be a user's restored state, and re-seeding it on
-// every construction is exactly how "defaults reappear after a logout/my files
-// vanished" bugs happen. Default folders are created once, by
-// initializeDefaultDirectories(), only when a brand new user filesystem is set
-// up (see main.cpp FS_LOAD).
-
 bool CommandPrompt::attachHome()
 {
     if (username.empty()) return false;
 
     std::string rootId = fs->getRootDirId();
 
-    // 1. Ensure /home exists under root (D0)
     std::string homeParentId = fs->findChildDirectoryIdByName(rootId, "home");
     if (homeParentId.empty()) {
         homeParentId = fs->createDirectory("home", rootId, 0);
     }
 
-    // 2. Ensure /home/<username> exists
     homeDirId = fs->findChildDirectoryIdByName(homeParentId, username);
     if (homeDirId.empty()) {
         homeDirId = fs->createDirectory(username, homeParentId, 0);
     }
 
-    // Fall back to root if home creation failed
     if (homeDirId.empty()) {
         homeDirId = rootId;
         currentDirId = homeDirId;
@@ -60,8 +42,6 @@ bool CommandPrompt::attachHome()
 
 void CommandPrompt::initializeDefaultDirectories()
 {
-    // The standard MiniOS user folders. Created on demand only — each one is
-    // skipped when it already exists, so existing content is never touched.
     const std::vector<std::string> defaultDirs = {
         "Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos"
     };
@@ -77,20 +57,11 @@ void CommandPrompt::ensureUsableHomeContents()
 {
     if (homeDirId.empty()) return;
 
-    // Anything at all inside home means the account holds real (possibly
-    // pruned) content — leave it exactly as it is, so a folder the user
-    // deleted never comes back.
     if (!fs->getChildDirectories(homeDirId).empty()) return;
     if (!fs->getChildFiles(homeDirId).empty()) return;
 
-    // An empty home directory can only be the remains of a wiped filesystem,
-    // so give the account its standard folders back.
     initializeDefaultDirectories();
 }
-
-// ============================================================
-// PATH RESOLUTION & NAVIGATION HELPERS
-// ============================================================
 
 std::string CommandPrompt::resolveDirPath(const std::string& path) const
 {
@@ -101,15 +72,16 @@ std::string CommandPrompt::resolveDirPath(const std::string& path) const
     std::string clean = stripQuotes(path);
     if (clean.empty()) return currentDirId;
 
+    // Normalize backslashes to forward slashes so Windows-style paths also work
+    std::replace(clean.begin(), clean.end(), '\\', '/');
+
     std::string curr;
     size_t startIdx = 0;
 
-    // Absolute path
     if (clean[0] == '/') {
         curr = fs->getRootDirId();
         startIdx = 1;
     }
-    // Home-relative path
     else if (clean[0] == '~') {
         curr = homeDirId;
         startIdx = 1;
@@ -117,7 +89,6 @@ std::string CommandPrompt::resolveDirPath(const std::string& path) const
             startIdx = 2;
         }
     }
-    // Relative path
     else {
         curr = currentDirId;
         startIdx = 0;
@@ -136,13 +107,12 @@ std::string CommandPrompt::resolveDirPath(const std::string& path) const
             if (!info.parentDirId.empty()) {
                 curr = info.parentDirId;
             }
-            // If parentDirId is empty, we are at root ("D0"); stay at root.
             continue;
         }
 
         std::string nextId = fs->findChildDirectoryIdByName(curr, token);
         if (nextId.empty()) {
-            return ""; // Directory component not found
+            return "";
         }
         curr = nextId;
     }
@@ -151,34 +121,32 @@ std::string CommandPrompt::resolveDirPath(const std::string& path) const
 }
 
 bool CommandPrompt::resolvePathToParentAndName(const std::string& path,
-                                              std::string& outParentDirId,
-                                              std::string& outName) const
+                                               std::string& outParentDirId,
+                                               std::string& outName) const
 {
     std::string clean = stripQuotes(path);
     if (clean.empty()) return false;
 
-    // Strip trailing slashes while length > 1
+    std::replace(clean.begin(), clean.end(), '\\', '/');
+
     while (clean.size() > 1 && clean.back() == '/') {
         clean.pop_back();
     }
 
     size_t lastSlash = clean.find_last_of('/');
 
-    // Case 1: No slash, parent is currentDirId
     if (lastSlash == std::string::npos) {
         outParentDirId = currentDirId;
         outName = clean;
         return !outName.empty() && outName != "." && outName != "..";
     }
 
-    // Case 2: Root-level file or folder, e.g. "/foo"
     if (lastSlash == 0) {
         outParentDirId = fs->getRootDirId();
         outName = clean.substr(1);
         return !outName.empty() && outName != "." && outName != "..";
     }
 
-    // Case 3: Nested path, e.g. "a/b/c" or "~/docs/notes.txt"
     std::string parentPath = clean.substr(0, lastSlash);
     outName = clean.substr(lastSlash + 1);
 
@@ -212,7 +180,6 @@ std::string CommandPrompt::buildDisplayPath(const std::string& dirId) const
         curr = info.parentDirId;
     }
 
-    // Check if homeDirId is an ancestor
     auto homeIt = std::find(chain.begin(), chain.end(), homeDirId);
     if (homeIt != chain.end()) {
         int homeIdx = static_cast<int>(std::distance(chain.begin(), homeIt));
@@ -223,7 +190,6 @@ std::string CommandPrompt::buildDisplayPath(const std::string& dirId) const
         return display;
     }
 
-    // Otherwise, build absolute display path from root
     std::string display = "";
     for (int i = static_cast<int>(chain.size()) - 2; i >= 0; --i) {
         display += "/" + fs->getDirectoryInfo(chain[i]).name;
@@ -231,10 +197,6 @@ std::string CommandPrompt::buildDisplayPath(const std::string& dirId) const
 
     return display.empty() ? "/" : display;
 }
-
-// ============================================================
-// FILE I/O HELPERS
-// ============================================================
 
 bool CommandPrompt::readFileContent(const std::string& fileId, const std::string& ownerPID, std::string& outContent) {
     fs->closeFile(fileId, ownerPID);
@@ -306,7 +268,6 @@ bool CommandPrompt::writeToFileOrPath(const std::string& target, const std::stri
         return false;
     }
 
-    // Fail if a directory already shares this name
     if (!fs->findChildDirectoryIdByName(parentDirId, name).empty()) {
         return false;
     }
@@ -328,10 +289,6 @@ bool CommandPrompt::writeToFileOrPath(const std::string& target, const std::stri
         return writeFileContent(fileId, ownerPID, content);
     }
 }
-
-// ============================================================
-// ESCAPES & PARSING UTILITIES
-// ============================================================
 
 std::string CommandPrompt::stripQuotes(const std::string& str)
 {
@@ -448,10 +405,6 @@ std::vector<std::string> CommandPrompt::splitCommand(const std::string& cmd)
     return tokens;
 }
 
-// ============================================================
-// COMMAND HANDLERS
-// ============================================================
-
 std::string CommandPrompt::executeWhoami() {
     return username + "\n";
 }
@@ -556,7 +509,6 @@ std::string CommandPrompt::executeCd(const std::vector<std::string>& args) {
         return "";
     }
 
-    // Check if path resolved to a regular file instead of a directory
     std::string parentId, name;
     if (resolvePathToParentAndName(target, parentId, name)) {
         FileInfo fi = fs->findChildFileByName(parentId, name);
@@ -671,7 +623,11 @@ std::string CommandPrompt::executeCat(const std::vector<std::string>& args)
         std::string content;
         bool ok = readFileContent(fi.fileId, fi.ownerPID, content);
         if (ok) {
-            out << content;
+            if (!content.empty() && content.back() != '\n') {
+                out << content << "\n";
+            } else {
+                out << content;
+            }
         } else {
             out << "[File System Emulator] Binary file or content not readable by OS.\n";
         }
@@ -692,12 +648,10 @@ std::string CommandPrompt::executeWrite(const std::string& fullCmd) {
     std::string target = stripQuotes(args[1]);
     std::string content = "";
     if (args.size() >= 3) {
-        // Join all tokens after the filename, preserving spaces
         for (size_t i = 2; i < args.size(); ++i) {
             if (i > 2) content += " ";
             content += args[i];
         }
-        // If user wants raw escapes processed, do it
         content = processEscapes(content);
     }
     bool ok = writeToFileOrPath(target, content, false);
@@ -781,7 +735,6 @@ std::string CommandPrompt::executeRm(const std::vector<std::string>& args)
 
     std::string errorMsg = "";
 
-    // Recursive directory cleanup lambda
     auto deleteDirRecursive = [this](auto& self, const std::string& dId) -> void {
         auto childFiles = fs->getChildFiles(dId);
         for (const auto& cf : childFiles) {
@@ -801,14 +754,12 @@ std::string CommandPrompt::executeRm(const std::vector<std::string>& args)
             continue;
         }
 
-        // 1. Check if target is a file
         FileInfo fi = fs->findChildFileByName(parentDirId, name);
         if (!fi.fileId.empty()) {
             fs->deleteFile(fi.fileId);
             continue;
         }
 
-        // 2. Check if target is a directory
         std::string dId = fs->findChildDirectoryIdByName(parentDirId, name);
         if (!dId.empty()) {
             if (dId == fs->getRootDirId()) {
@@ -856,7 +807,7 @@ std::string CommandPrompt::executeTouch(const std::vector<std::string>& args)
             }
         } else {
             if (!fs->findChildDirectoryIdByName(parentDirId, name).empty()) {
-                continue; // Directory already exists with this name
+                continue;
             }
             std::string fileId = fs->createFile("USER", name, 1, 0, parentDirId);
             if (!fileId.empty()) {
@@ -893,31 +844,28 @@ std::string CommandPrompt::executeUname(const std::vector<std::string>& args) {
 std::string CommandPrompt::executeHelp() {
     std::ostringstream out;
     out << "MiniOS Command Prompt - Supported Commands:\n"
-        << "  whoami   - Print the current user\n"
-        << "  pwd      - Print working directory\n"
-        << "  ls       - List directory contents\n"
-        << "  cd       - Change directory\n"
-        << "  mkdir    - Create a directory\n"
-        << "  rm       - Remove files or directories (use -r for recursive)\n"
-        << "  touch    - Create an empty file\n"
-        << "  cat      - Read a file\n"
-        << "  echo     - Write/print text (supports -e, -n, and > / >> redirection)\n"
-        << "  printf   - Formatted print with escapes (supports > / >> redirection)\n"
-        << "  read     - Read file content (alias to cat)\n"
-        << "  write    - Directly overwrite file content: write <file> <content>\n"
-        << "  append   - Directly append file content: append <file> <content>\n"
-        << "  history  - View command history\n"
-        << "  date     - Show system date and time\n"
-        << "  uname    - Print system information\n"
-        << "  clear    - Clear the terminal screen\n"
-        << "  help     - Show this help message\n"
-        << "  exit     - Close the terminal\n";
+        << "  File & Directory Commands:\n"
+        << "    touch <file>            - Create an empty file (alias: create)\n"
+        << "    write <file> <text>     - Create/overwrite file with text\n"
+        << "    append <file> <text>    - Append text to a file\n"
+        << "    echo <text> > <file>    - Redirect text to a file (>> to append)\n"
+        << "    cat <file>              - Read file content (aliases: read, print, type)\n"
+        << "    ls [dir]                - List directory contents (alias: dir)\n"
+        << "    cd <dir>                - Change directory (cd .. or cd.. to go back)\n"
+        << "    pwd                     - Print working directory\n"
+        << "    mkdir <dir>             - Create a new folder\n"
+        << "    rm [-r] <target>        - Delete a file or folder (alias: del)\n"
+        << "  Kernel & Process Commands:\n"
+        << "    ps                      - List all active and terminated processes\n"
+        << "    spawn <name> [p] [a] [b] [m] - Create a new process\n"
+        << "    kill <pid>              - Terminate a running/ready process\n"
+        << "    remove <pid>            - Delete a process from the table\n"
+        << "    mem                     - Show memory allocation stats\n"
+        << "    step / run / pause / reset - Control simulation clock\n"
+        << "  System Commands:\n"
+        << "    whoami, date, uname, history, clear (cls), help, exit\n";
     return out.str();
 }
-
-// ============================================================
-// TOP-LEVEL EXECUTION & TERMINAL INTERFACE
-// ============================================================
 
 std::string CommandPrompt::executeCommand(const std::string& input) {
     if (input.empty()) return "";
@@ -947,19 +895,24 @@ std::string CommandPrompt::executeCommand(const std::string& input) {
 
     if (cmd == "exit") return "";
     else if (cmd == "whoami") return executeWhoami();
-    else if (cmd == "ls") return executeLs(args);
+    else if (cmd == "ls" || cmd == "dir") return executeLs(args);
     else if (cmd == "cd") return executeCd(args);
+    else if (cmd == "cd.." || cmd == ".." || cmd == "back") {
+        return executeCd({ "cd", ".." });
+    }
+    else if (cmd == "cd/" || cmd == "cd\\") {
+        return executeCd({ "cd", "/" });
+    }
     else if (cmd == "echo") return executeEcho(input);
     else if (cmd == "printf") return executePrintf(input);
-    else if (cmd == "read") return executeRead(args);
+    else if (cmd == "cat" || cmd == "read" || cmd == "print" || cmd == "type") return executeRead(args);
     else if (cmd == "write") return executeWrite(input);
     else if (cmd == "append") return executeAppend(input);
     else if (cmd == "mkdir") return executeMkdir(args);
-    else if (cmd == "rm") return executeRm(args);
+    else if (cmd == "rm" || cmd == "del") return executeRm(args);
     else if (cmd == "pwd") return executePwd();
-    else if (cmd == "clear") return executeClear();
-    else if (cmd == "touch") return executeTouch(args);
-    else if (cmd == "cat") return executeCat(args);
+    else if (cmd == "clear" || cmd == "cls") return executeClear();
+    else if (cmd == "touch" || cmd == "create" || cmd == "mkfile") return executeTouch(args);
     else if (cmd == "history") return executeHistory();
     else if (cmd == "date") return executeDate();
     else if (cmd == "uname") return executeUname(args);
