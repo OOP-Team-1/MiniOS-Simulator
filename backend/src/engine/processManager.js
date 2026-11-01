@@ -1,3 +1,4 @@
+import fs from 'fs';
 import { spawn } from 'child_process';
 import { ENGINE_BINARY_PATH } from '../config/paths.js';
 import { createStreamParser } from './streamParser.js';
@@ -48,6 +49,9 @@ export function startEngine(handlers = {}) {
 
     isShuttingDown = false;
     const freshBoot = !engineEverLoadedUser;
+    if (process.platform !== 'win32' && fs.existsSync(ENGINE_BINARY_PATH)) {
+        try { fs.chmodSync(ENGINE_BINARY_PATH, 0o755); } catch {}
+    }
     engineProcess = spawn(ENGINE_BINARY_PATH);
 
     createStreamParser(engineProcess.stdout, {

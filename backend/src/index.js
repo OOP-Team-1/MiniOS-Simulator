@@ -12,18 +12,31 @@ import { writeVfs } from './storage/vfsStore.js';
 const app = express();
 const server = http.createServer(app);
 
-app.use(cors());
+const frontendUrl = process.env.FRONTEND_URL;
+const corsOrigin = (frontendUrl && frontendUrl !== '*')
+    ? [
+        frontendUrl,
+        frontendUrl.replace(/\/$/, ''),
+        frontendUrl.replace(/\/$/, '') + '/',
+        'http://localhost:5173',
+        'http://localhost:3000'
+      ]
+    : '*';
+
+app.use(cors({
+    origin: corsOrigin === '*' ? true : corsOrigin,
+    credentials: true
+}));
 app.use(express.json());
 
 app.use('/api', healthRoutes);
 app.use('/api', simulationRoutes);
 
-const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
-
 const io = new Server(server, {
     cors: {
-        origin: frontendUrl,
-        methods: ["GET", "POST"]
+        origin: corsOrigin,
+        methods: ["GET", "POST"],
+        credentials: true
     }
 });
 

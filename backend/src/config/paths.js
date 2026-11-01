@@ -22,4 +22,4 @@ const existing = candidates
         }
     });
 
-export const ENGINE_BINARY_PATH = existing[0] || candidates[2];
+export const ENGINE_BINARY_PATH = existing[0] || (process.platform === 'win32' ? candidates[2] : candidates[3]);

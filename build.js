@@ -18,6 +18,40 @@ function commandAvailable(cmd, testArg = '--version') {
     }
 }
 
+function getCMakeCommand() {
+    if (commandAvailable('cmake')) {
+        return 'cmake';
+    }
+
+    // On Linux without cmake (such as standard Render native environment), auto-fetch portable binary
+    if (process.platform === 'linux' && process.arch === 'x64') {
+        const localCmakeDir = path.resolve(__dirname, '.cmake');
+        const localCmakeBin = path.join(localCmakeDir, 'bin', 'cmake');
+
+        if (fs.existsSync(localCmakeBin)) {
+            return localCmakeBin;
+        }
+
+        console.log('[build:engine] CMake not found in PATH. Auto-downloading portable CMake for Linux...');
+        try {
+            fs.mkdirSync(localCmakeDir, { recursive: true });
+            const tarUrl = 'https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz';
+            const res = spawnSync('sh', ['-c', `curl -sL "${tarUrl}" | tar -xz --strip-components=1 -C "${localCmakeDir}"`], {
+                stdio: 'inherit'
+            });
+
+            if (res.status === 0 && fs.existsSync(localCmakeBin)) {
+                console.log('[build:engine] Portable CMake downloaded successfully.');
+                return localCmakeBin;
+            }
+        } catch (err) {
+            console.warn('[build:engine] Failed to auto-download CMake:', err.message);
+        }
+    }
+
+    return 'cmake';
+}
+
 function detectGenerator() {
     if (process.platform !== 'win32') {
         return null;
@@ -53,19 +87,20 @@ function cleanCache() {
 }
 
 function runCMake() {
+    const cmakeCmd = getCMakeCommand();
     const generator = detectGenerator();
     const configureArgs = ['-B', buildDir, '-S', engineDir];
     if (generator) {
         configureArgs.push('-G', generator);
     }
 
-    console.log(`[build:engine] Configuring C++ engine with CMake${generator ? ` (Generator: ${generator})` : ''}...`);
-    let conf = spawnSync('cmake', configureArgs, { stdio: 'inherit' });
+    console.log(`[build:engine] Configuring C++ engine with ${cmakeCmd}${generator ? ` (Generator: ${generator})` : ''}...`);
+    let conf = spawnSync(cmakeCmd, configureArgs, { stdio: 'inherit' });
 
     if (conf.status !== 0) {
         console.warn('[build:engine] Initial configure failed. Clearing CMakeCache and retrying with detected generator...');
         cleanCache();
-        conf = spawnSync('cmake', configureArgs, { stdio: 'inherit' });
+        conf = spawnSync(cmakeCmd, configureArgs, { stdio: 'inherit' });
         if (conf.status !== 0) {
             console.error('[build:engine] CMake configuration failed.');
             process.exit(conf.status ?? 1);
@@ -73,11 +108,19 @@ function runCMake() {
     }
 
     console.log('[build:engine] Compiling C++ engine (Release)...');
-    const build = spawnSync('cmake', ['--build', buildDir, '--config', 'Release'], { stdio: 'inherit' });
+    const build = spawnSync(cmakeCmd, ['--build', buildDir, '--config', 'Release'], { stdio: 'inherit' });
 
     if (build.status !== 0) {
         console.error('[build:engine] CMake build failed.');
         process.exit(build.status ?? 1);
+    }
+
+    // On Linux/Unix, ensure the compiled binary has executable permissions
+    const linuxBin = path.join(buildDir, 'main');
+    if (process.platform !== 'win32' && fs.existsSync(linuxBin)) {
+        try {
+            fs.chmodSync(linuxBin, 0o755);
+        } catch {}
     }
 
     console.log('[build:engine] C++ engine build completed successfully.');
