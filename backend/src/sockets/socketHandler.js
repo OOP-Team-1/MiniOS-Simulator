@@ -106,6 +106,15 @@ export function registerSocketEvents(io) {
             stopAutoStep();
             sendCommand("RESET");
         });
+        // Clears timeline/metrics/vruntime while keeping the process table.
+        socket.on('cmd:reset_stats', () => {
+            sendCommand("RESET_STATS");
+        });
+        // Rewinds the whole run to tick 0 while keeping the process table, so
+        // the same workload can be compared across algorithms.
+        socket.on('cmd:restart_run', () => {
+            sendCommand("RESTART_RUN");
+        });
         // data: { fileId, newName }
         socket.on('cmd:file_rename', (data) => {
             if (!data) return;
@@ -117,13 +126,17 @@ export function registerSocketEvents(io) {
         });
         socket.on('cmd:set_scheduler', (data) => {
             if (!data) return;
-            const allowed = ['FCFS', 'SJF', 'SRTF', 'PRIORITY', 'RR'];
+            const allowed = ['FCFS', 'SJF', 'SRTF', 'PRIORITY', 'RR', 'CFS'];
             const type = String(data.type).toUpperCase();
             if (!allowed.includes(type)) return;
 
             if (type === 'RR') {
                 const quantum = Math.max(1, parseInt(data.quantum, 10) || 2);
                 sendCommand(`SET_SCHEDULER RR ${quantum}`);
+            } else if (type === 'CFS') {
+                const latency = Math.min(1000, Math.max(1, Number(data.targetLatency) || 24));
+                const granularity = Math.min(latency, Math.max(1, Number(data.minGranularity) || 3));
+                sendCommand(`SET_SCHEDULER CFS ${latency} ${granularity}`);
             } else {
                 sendCommand(`SET_SCHEDULER ${type}`);
             }
@@ -156,16 +169,17 @@ export function registerSocketEvents(io) {
         // ── Process creation ──────────────────────────────────────────────────
         socket.on('cmd:add_process', (data) => {
             if (!data) return;
-            const { name, priority, arrival, burst, memory } = data;
+            const { name, priority, arrival, burst, memory, weight } = data;
 
             const safeName = String(name).replace(/[^a-zA-Z0-9_-]/g, '');
             const p = parseInt(priority, 10) || 1;
             const a = parseInt(arrival, 10) || 0;
             const b = parseInt(burst, 10) || 1;
             const m = parseInt(memory, 10) || 1;
+            const w = Math.min(100, Math.max(1, parseInt(weight, 10) || 10));
 
             if (safeName && b > 0 && m > 0) {
-                sendCommand(`ADD ${safeName} ${p} ${a} ${b} ${m}`);
+                sendCommand(`ADD ${safeName} ${p} ${a} ${b} ${m} ${w}`);
             }
         });
         // ── Process termination ───────────────────────────────────────────────

@@ -259,11 +259,101 @@ async function main() {
             check('mirror stores the snapshot text', typeof record.snapshot === 'string' && record.snapshot.startsWith('MINIOS_VFS 1'));
         }
 
-        // ── 9. Filesystem survives a real server restart ────────────────────
+        // ── 9. CFS scheduling through the real engine ────────────────────────
+        // The engine (not JavaScript) must be the source of truth for vruntime,
+        // weighted slices, preemption, timeline, and metrics.
+        console.log('\n[9] CFS scheduling engine');
+        socket.emit('cmd:reset');
+        await waitForTelemetry((t) => (t.processes || []).length === 0);
+
+        const cfsSelectedP = waitForTelemetry((t) => t.config?.scheduler === 'CFS' && !!t.cfs);
+        socket.emit('cmd:set_scheduler', { type: 'CFS', targetLatency: 24, minGranularity: 3 });
+        const cfsSelected = await cfsSelectedP;
+        check('CFS is selectable through the API', cfsSelected.config.scheduler === 'CFS', JSON.stringify(cfsSelected.config));
+        check('CFS echoes target latency', Number(cfsSelected.cfs?.targetLatency) === 24, JSON.stringify(cfsSelected.cfs));
+        check('CFS echoes minimum granularity', Number(cfsSelected.cfs?.minGranularity) === 3, JSON.stringify(cfsSelected.cfs));
+
+        socket.emit('cmd:add_process', { name: 'cfs_low', priority: 1, arrival: 0, burst: 30, memory: 10, weight: 10 });
+        socket.emit('cmd:add_process', { name: 'cfs_high', priority: 1, arrival: 0, burst: 30, memory: 10, weight: 20 });
+        const cfsProcs = await waitForTelemetry((t) => (t.processes || []).length === 2);
+        check('process weight is stored on the PCB', cfsProcs.processes.find((p) => p.name === 'cfs_high')?.weight === 20, JSON.stringify(cfsProcs.processes));
+
+        for (let i = 0; i < 24; i++) socket.emit('cmd:step');
+        const fairTelemetry = await waitForTelemetry((t) => t.tick >= 24, 15000);
+        const lowPid = fairTelemetry.processes.find((p) => p.name === 'cfs_low')?.pid;
+        const highPid = fairTelemetry.processes.find((p) => p.name === 'cfs_high')?.pid;
+        const lowTicks = fairTelemetry.timeline.filter((s) => s.pid === lowPid).reduce((sum, s) => sum + s.duration, 0);
+        const highTicks = fairTelemetry.timeline.filter((s) => s.pid === highPid).reduce((sum, s) => sum + s.duration, 0);
+        check('CFS weighted slices allocate a 1:2 CPU share', lowTicks === 8 && highTicks === 16, `${lowTicks}:${highTicks}`);
+        check('CFS accumulates weighted vruntime', Number(fairTelemetry.processes.find((p) => p.pid === lowPid)?.vruntime) === 8 &&
+            Number(fairTelemetry.processes.find((p) => p.pid === highPid)?.vruntime) === 8, JSON.stringify(fairTelemetry.processes));
+        check('CFS publishes minimum vruntime', Number(fairTelemetry.cfs?.minVruntime) === 8, JSON.stringify(fairTelemetry.cfs));
+        check('CFS timeline is engine-generated', fairTelemetry.timeline.length >= 2 && fairTelemetry.timeline.every((s) => s.duration > 0 && s.start < s.end));
+        check('CFS exposes the ready queue', Array.isArray(fairTelemetry.readyQueue));
+
+        socket.emit('cmd:restart_run');
+        const rewound = await waitForTelemetry(
+            (t) => t.tick === 0 && t.timeline.length === 0 &&
+                (t.processes || []).length === 2 &&
+                t.processes.every((p) => p.remainingTime === p.burstTime && Number(p.vruntime) === 0)
+        );
+        check('restart run rewinds bursts, vruntime, and tick', rewound.tick === 0 && rewound.timeline.length === 0);
+
+        // Wake-up preemption: P3 arrives while P1 owns the CPU. Because P3 joins
+        // at the minimum vruntime (P2 is still at 0), it must preempt P1.
+        socket.emit('cmd:reset');
+        await waitForTelemetry((t) => (t.processes || []).length === 0);
+        socket.emit('cmd:set_scheduler', { type: 'CFS', targetLatency: 24, minGranularity: 3 });
+        socket.emit('cmd:add_process', { name: 'pre_a', priority: 1, arrival: 0, burst: 20, memory: 10, weight: 10 });
+        socket.emit('cmd:add_process', { name: 'pre_b', priority: 1, arrival: 0, burst: 20, memory: 10, weight: 10 });
+        socket.emit('cmd:add_process', { name: 'pre_c', priority: 1, arrival: 5, burst: 10, memory: 10, weight: 10 });
+        await waitForTelemetry((t) => (t.processes || []).length === 3);
+        for (let i = 0; i < 8; i++) socket.emit('cmd:step');
+        const preemptTelemetry = await waitForTelemetry((t) => t.tick >= 8, 10000);
+        const preC = preemptTelemetry.processes.find((p) => p.name === 'pre_c');
+        check('CFS preempts the running task for a newly arrived task', Number(preemptTelemetry.cfs?.preemptions) >= 1, JSON.stringify(preemptTelemetry.cfs));
+        check('a new dispatch happens at the arrival tick', preemptTelemetry.timeline.some((s) => s.start === 5), JSON.stringify(preemptTelemetry.timeline));
+
+        for (let i = 0; i < 60; i++) socket.emit('cmd:step');
+        const completedTelemetry = await waitForTelemetry(
+            (t) => (t.processes || []).length === 3 && t.processes.every((p) => p.state === 'TERMINATED'),
+            15000
+        );
+        check('the newly arrived task also receives CPU time', completedTelemetry.timeline.some((s) => s.pid === preC?.pid), JSON.stringify(completedTelemetry.timeline));
+        check('all CFS processes eventually complete', completedTelemetry.metrics.completedProcesses === 3, JSON.stringify(completedTelemetry.metrics));
+        check('CFS reports waiting/turnaround/response metrics', completedTelemetry.metrics.averageWaiting >= 0 &&
+            completedTelemetry.metrics.averageTurnaround > 0 && completedTelemetry.metrics.averageResponse >= 0, JSON.stringify(completedTelemetry.metrics));
+        check('CFS reports CPU utilization and context switches', completedTelemetry.metrics.cpuUtilization > 0 &&
+            completedTelemetry.metrics.contextSwitches > 0, JSON.stringify(completedTelemetry.metrics));
+        check('every process carries per-process metrics', completedTelemetry.processes.every((p) =>
+            p.completionTime >= 0 && p.waitingTime >= 0 && p.turnaroundTime >= 0 && p.responseTime >= 0));
+
+        // Regression coverage for the pre-existing algorithms after the
+        // scheduling-loop refactor: every policy must still complete a workload
+        // and publish engine metrics.
+        for (const algorithm of ['FCFS', 'SJF', 'SRTF', 'PRIORITY', 'RR']) {
+            socket.emit('cmd:reset');
+            await waitForTelemetry((t) => (t.processes || []).length === 0);
+            socket.emit('cmd:set_scheduler', { type: algorithm, quantum: 2 });
+            await waitForTelemetry((t) => t.config?.scheduler === algorithm);
+            socket.emit('cmd:add_process', { name: `${algorithm}_a`, priority: 3, arrival: 0, burst: 5, memory: 10, weight: 10 });
+            socket.emit('cmd:add_process', { name: `${algorithm}_b`, priority: 1, arrival: 0, burst: 7, memory: 10, weight: 10 });
+            socket.emit('cmd:add_process', { name: `${algorithm}_c`, priority: 2, arrival: 2, burst: 3, memory: 10, weight: 10 });
+            await waitForTelemetry((t) => (t.processes || []).length === 3);
+            for (let i = 0; i < 25; i++) socket.emit('cmd:step');
+            const policyDone = await waitForTelemetry(
+                (t) => (t.processes || []).length === 3 && t.processes.every((p) => p.state === 'TERMINATED'),
+                15000
+            );
+            check(`${algorithm} still completes the workload`, policyDone.metrics.completedProcesses === 3, JSON.stringify(policyDone.metrics));
+            check(`${algorithm} still emits a timeline`, policyDone.timeline.length > 0);
+        }
+
+        // ── 10. Filesystem survives a real server restart ────────────────────
         // Regression test for "my files vanished after restarting the server":
         // kill the backend completely, boot a brand new one over the same data
         // directory, then log back in like a real user would.
-        console.log('\n[9] Persistence across a real server restart');
+        console.log('\n[10] Persistence across a real server restart');
         socket.close();
         try { await fetch(`${BASE}/api/engine/stop`); } catch { /* already down */ }
         await sleep(300);
@@ -293,10 +383,10 @@ async function main() {
         const catAfterRestart = await execRestarted('cat projects/edit.txt');
         check('edited content survived the restart', catAfterRestart.output.includes('edited contents'), JSON.stringify(catAfterRestart.output));
 
-        // ── 10. Boot restore without a re-login ─────────────────────────────
+        // ── 11. Boot restore without a re-login ─────────────────────────────
         // A browser tab left open across a restart never re-emits vfs:load, so
         // the backend has to put the last user's filesystem back by itself.
-        console.log('\n[10] Backend restores the filesystem without a re-login');
+        console.log('\n[11] Backend restores the filesystem without a re-login');
         socket.close();
         try { await fetch(`${BASE}/api/engine/stop`); } catch { /* already down */ }
         await sleep(300);

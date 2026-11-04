@@ -60,9 +60,10 @@ Designed for computer science students, educators, and systems enthusiasts, Mini
 
 ### 2. CPU Scheduling Lab
 - **Real-Time Interactive Gantt Chart**: Color-coded, tick-by-tick timeline visualization of process execution across the CPU core.
-- **Algorithm Comparison**: Instant switching between 5 scheduling policies with dynamic time quantum adjustments.
-- **Live Metrics Dashboard**: Real-time calculation of Waiting Time ($T_w$), Turnaround Time ($T_{ta}$), CPU Utilization, and Throughput.
-- **Execution Controls**: Run continuous clock cycles, step forward by a single tick, pause execution, or reset CPU state.
+- **Algorithm Comparison**: Instant switching between 6 scheduling policies — FCFS, SJF, SRTF, Priority, Round Robin, and the Completely Fair Scheduler (CFS) — with dynamic time quantum and CFS tuning parameters.
+- **CFS Virtual Runtime Visualization**: Live minimum vruntime, per-process vruntime bars, weighted CPU shares, slice budget, and wake-up preemption counters streamed directly from the C++ engine.
+- **Live Metrics Dashboard**: Engine-computed average Waiting Time ($T_w$), Turnaround Time ($T_{ta}$), Response Time, CPU Utilization, Context Switches, and per-process metrics.
+- **Execution Controls**: Run continuous clock cycles, step forward by a single tick, pause execution, rewind the same workload to tick 0, or clear scheduling statistics.
 
 ### 3. Memory Management & Paging
 - **Contiguous Allocation Visualizer**: Dynamic visual representation of RAM partitions (100 KB total default pool). Inspect allocated segments, process ownership, and free holes.
@@ -86,7 +87,7 @@ Designed for computer science students, educators, and systems enthusiasts, Mini
 - **OS Kernel Command Bridge**: Directly inspect and manage the OS kernel through the shell:
   - `ps`, `top`: Display active process control blocks.
   - `mem`, `free`: Summarize physical and virtual memory usage.
-  - `spawn <name> [pri] [arr] [burst] [mem]`: Spawn a process into the kernel.
+  - `spawn <name> [pri] [arr] [burst] [mem] [weight]`: Spawn a process into the kernel.
   - `kill <pid>`: Terminate an active process.
   - `step`, `run`, `pause`, `reset`: Control simulation clock cycles.
 
@@ -134,7 +135,7 @@ MiniOS is engineered as an end-to-end, decoupled three-tier system:
 │                           KERNEL ENGINE TIER (C++20 Native)                      │
 │  IPC Command Dispatcher (`main.cpp`)                                             │
 │  ├─ Process Manager: PCB lifecycle (NEW, READY, RUNNING, BLOCKED, TERMINATED)    │
-│  ├─ CPU Core & Schedulers: FCFS • SJF • SRTF • Priority • Round Robin            │
+│  ├─ CPU Core & Schedulers: FCFS • SJF • SRTF • Priority • RR • CFS                  │
 │  ├─ Memory Manager: First-Fit • Best-Fit • Worst-Fit • Memory Compaction         │
 │  ├─ Paging Manager: 64 Frames • 4 KB Pages • FIFO & LRU Page Replacement Tables  │
 │  └─ Virtual File System: Inode directory hierarchy • Contiguous block allocator  │
@@ -201,7 +202,7 @@ MiniOS is engineered as an end-to-end, decoupled three-tier system:
 │   ┌─────────────┐ ┌─────────────┐     ┌─────────────┐     ┌─────────────┐         │
 │   │ CPU Core &  │ │ Memory Mgr  │     │ Virtual     │     │ Virtual     │         │
 │   │ Schedulers  │ │ (First/Best/│     │ Paging Mgr  │     │ File System │         │
-│   │(FCFS, RR...)│ │ Worst-Fit)  │     │ (FIFO, LRU) │     │ (Inodes/Dir)│         │
+│   │(FCFS, CFS..)│ │ Worst-Fit)  │     │ (FIFO, LRU) │     │ (Inodes/Dir)│         │
 │   └─────────────┘ └─────────────┘     └─────────────┘     └──────┬──────┘         │
 └──────────────────────────────────────────────────────────────────┼────────────────┘
                                                                    │ 512-Byte Sectors
@@ -297,6 +298,15 @@ MiniOS is engineered as an end-to-end, decoupled three-tier system:
 | **SRTF** | Shortest Remaining Time ($T_{rem}$) | None | Preempts when shorter jobs arrive; minimal latency. |
 | **Priority** | Lowest Priority Number (1 = highest) | Priority levels | Strict priority ordering. |
 | **Round Robin (RR)** | FCFS Ready Queue with Quantum Slice | Time Quantum ($q \ge 1$) | Fair CPU sharing; responsive for interactive loads. |
+| **CFS** | Smallest Virtual Runtime ($vruntime$) | Target Latency, Min Granularity, Process Weight | Weighted fair CPU sharing; new tasks join at the current minimum vruntime. |
+
+#### Completely Fair Scheduler (CFS) Model
+- Every PCB carries `vruntime`, `weight`, `firstRunTime`, `completionTime`, and accumulated CPU time.
+- Executing one tick adds `delta_vruntime = executed_ticks × base_weight / process_weight` (default `base_weight = 10`).
+- The scheduler always runs the runnable process with the smallest vruntime; newly arrived processes inherit the current minimum vruntime.
+- Time slices are weighted by the runnable set: `slice = target_latency × weight / total_runnable_weight`, clamped by `min_granularity` and the remaining burst.
+- A newly arrived process preempts the current one when its vruntime is at least `min_granularity` below the current process's vruntime.
+- The engine publishes `cfs` telemetry (runnable count, minimum vruntime, current slice/remaining budget, preemptions, last decision) plus `readyQueue`, `timeline`, `events`, and `metrics`.
 
 ### Memory Allocation & Page Replacement
 
@@ -351,7 +361,7 @@ The terminal supports both UNIX-like filesystem verbs and OS kernel verbs:
 | :--- | :--- | :--- |
 | `ps` / `top` | Display process table with PID, priority, burst, and memory | `ps` |
 | `mem` / `free` | Display total, used, free memory and external fragmentation | `mem` |
-| `spawn` | Spawn a new process into the kernel | `spawn worker 2 0 6 15` |
+| `spawn` | Spawn a new process into the kernel | `spawn worker 2 0 6 15 10` |
 | `kill` | Send a kill signal to terminate a process by PID | `kill 0P1` |
 | `step` / `tick` | Advance the simulation by exactly one clock cycle | `step` |
 | `run` | Start continuous auto-stepping clock | `run 500` *(interval in ms)* |
@@ -393,6 +403,7 @@ MiniOS-Simulator/
 │   ├── include/                    # Header declarations
 │   │   ├── AllocationStrategy.h    # Memory allocation strategy interface
 │   │   ├── BestFit.h               # Best-Fit memory strategy
+│   │   ├── CFSScheduler.h          # Completely Fair Scheduler (vruntime)
 │   │   ├── CommandPrompt.h         # Terminal shell parser & command executor
 │   │   ├── ContiguousAllocation.h  # File contiguous allocation strategy
 │   │   ├── CPU.h                   # CPU execution unit
@@ -427,7 +438,7 @@ MiniOS-Simulator/
 │   ├── tailwind.config.js          # Tailwind CSS styling configuration
 │   ├── public/                     # Static wallpapers & background assets
 │   ├── scripts/
-│   │   └── verify-backend.mjs      # 10-phase automated end-to-end test suite
+│   │   └── verify-backend.mjs      # 11-phase automated end-to-end test suite
 │   └── src/
 │       ├── App.jsx                 # Desktop UI, window manager, docking system
 │       ├── index.css               # Core styling & glassmorphism utilities
@@ -536,8 +547,9 @@ npm run verify:backend --prefix frontend
 6. **Deletion Durability**: Verifies deleted default directories are not resurrected upon session reload.
 7. **Text Editor Round-Trip**: Verifies `FILE_CONTENT` read and `FILE_SAVE` write operations.
 8. **Atomic Server Mirroring**: Confirms files are physically saved on disk as valid `MINIOS_VFS 1` files.
-9. **Process Crash & Restart Resilience**: Kills the backend completely, restarts it, and asserts zero data loss.
-10. **Zero-Login Boot Restoration**: Verifies the engine automatically restores the last active user tree.
+9. **CFS Scheduling Engine**: Verifies weighted 1:2 CPU shares, weighted vruntime accumulation, minimum-vruntime telemetry, wake-up preemption on arrival, engine-generated timelines, run rewind, and completion metrics.
+10. **Process Crash & Restart Resilience**: Kills the backend completely, restarts it, and asserts zero data loss.
+11. **Zero-Login Boot Restoration**: Verifies the engine automatically restores the last active user tree.
 
 ---
 
@@ -561,12 +573,14 @@ npm run verify:backend --prefix frontend
 | `vfs:load` | `{ user: string, snapshot?: string }` | VFS account hydration |
 | `shell:exec` | `{ command: string }` | Terminal shell or kernel bridge |
 | `cmd:step` | *None* | Simulation clock |
-| `cmd:set_scheduler`| `{ type: 'FCFS'\|'SJF'\|'SRTF'\|'PRIORITY'\|'RR', quantum?: number }` | CPU Scheduler |
+| `cmd:set_scheduler`| `{ type: 'FCFS'\|'SJF'\|'SRTF'\|'PRIORITY'\|'RR'\|'CFS', quantum?: number, targetLatency?: number, minGranularity?: number }` | CPU Scheduler |
 | `cmd:set_alloc` | `{ type: 'FirstFit'\|'BestFit'\|'WorstFit' }` | Dynamic Memory Manager |
 | `cmd:set_page_policy` | `{ policy: 'FIFO'\|'LRU' }` | Paging Manager |
 | `cmd:access_mem` | `{ pid: string, logicalAddress: number }` | MMU address translation |
-| `cmd:add_process`| `{ name, priority, arrival, burst, memory }` | Process Manager |
+| `cmd:add_process`| `{ name, priority, arrival, burst, memory, weight? }` | Process Manager |
 | `cmd:kill_process`| `{ pid: string }` | Process Manager |
+| `cmd:reset_stats` | *None* | Clears timeline/metrics/vruntime, keeps the process table |
+| `cmd:restart_run` | *None* | Rewinds the current workload to tick 0 |
 | `cmd:compact` | *None* | Memory Compactor |
 | `cmd:disk_compact`| *None* | Disk Compactor |
 | `cmd:file_save` | `{ requestId: string, fileId: string, content: string }` | File System / Text Editor |
@@ -596,9 +610,10 @@ All multi-line strings, arbitrary file contents, and shell command strings are *
 ```text
 STEP                                   # Step clock 1 tick
 STATE                                  # Request immediate telemetry output
-ADD <name> <prio> <arr> <burst> <mem>  # Spawn process
+ADD <name> <prio> <arr> <burst> <mem> [weight]  # Spawn process
 KILL <pid>                             # Kill process
 SET_SCHEDULER <type> [quantum]         # Set scheduler (FCFS, SJF, SRTF, PRIORITY, RR)
+SET_SCHEDULER CFS <latency> <gran>     # Set CFS target latency and min granularity
 SET_ALLOC <strategy>                   # Set memory allocator (FirstFit, BestFit, WorstFit)
 SET_PAGE_POLICY <policy>               # Set page replacement (FIFO, LRU)
 ACCESS_MEM <pid> <logicalAddress>      # Test address translation
@@ -609,6 +624,8 @@ FILE_SAVE <reqId> <fileId> <b64data>   # Save file contents
 FILE_CONTENT <fileId>                  # Read file contents for editor
 FS_LOAD <user> <b64snapshot|->         # Load or initialize filesystem snapshot
 SHELL <b64command>                     # Execute shell command
+RESET_STATS                            # Clear timeline/metrics/vruntime (keep processes)
+RESTART_RUN                            # Rewind the process table to tick 0
 COMPACT                                # Compact RAM blocks
 DISK_COMPACT                           # Compact disk blocks
 EXIT                                   # Gracefully terminate engine

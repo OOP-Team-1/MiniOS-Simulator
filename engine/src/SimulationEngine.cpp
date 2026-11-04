@@ -1,5 +1,8 @@
 #include "../include/SimulationEngine.h"
 
+#include <algorithm>
+#include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 
@@ -14,9 +17,14 @@ SimulationEngine::SimulationEngine(
     fileSystem(&fs),
     currentTick(0),
     lastExecutedPID("NONE"),
+    lastDispatchPID("NONE"),
     schedulerName("RR"),
     schedulerQuantum(2),
-    allocName("FirstFit")
+    allocName("FirstFit"),
+    eventSequence(0),
+    contextSwitches(0),
+    busyTicks(0),
+    idleTicks(0)
 {
 }
 
@@ -30,9 +38,14 @@ SimulationEngine::SimulationEngine(
     fileSystem(&fs),
     currentTick(0),
     lastExecutedPID("NONE"),
+    lastDispatchPID("NONE"),
     schedulerName("RR"),
     schedulerQuantum(2),
-    allocName("FirstFit")
+    allocName("FirstFit"),
+    eventSequence(0),
+    contextSwitches(0),
+    busyTicks(0),
+    idleTicks(0)
 {
 }
 
@@ -48,12 +61,89 @@ void SimulationEngine::log(const std::string& message)
     }
 }
 
+void SimulationEngine::recordEvent(const std::string& type,
+                                   const std::string& pid,
+                                   const std::string& message)
+{
+    SimulationEvent event;
+    event.seq = ++eventSequence;
+    event.tick = currentTick;
+    event.type = type;
+    event.pid = pid;
+    event.message = message;
+    tickEvents.push_back(event);
+}
+
+void SimulationEngine::recordStateChanges()
+{
+    for (const Process* process : processManager.getAllProcesses())
+    {
+        const std::string pid = process->getPID();
+        const std::string state = process->getState();
+
+        std::map<std::string, std::string>::iterator it = lastProcessStates.find(pid);
+        const std::string previous = (it == lastProcessStates.end()) ? "NEW" : it->second;
+
+        if (previous != state)
+        {
+            recordEvent(
+                "STATE_CHANGE",
+                pid,
+                "PID " + pid + " " + previous + " -> " + state
+            );
+            lastProcessStates[pid] = state;
+        }
+    }
+}
+
+void SimulationEngine::recordReadyQueueChange()
+{
+    std::vector<std::string> queue;
+    for (const Process* process : processManager.getAllProcesses())
+    {
+        if (process->getState() == "READY")
+        {
+            queue.push_back(process->getPID());
+        }
+    }
+
+    if (queue == lastReadyQueue)
+    {
+        return;
+    }
+
+    lastReadyQueue = queue;
+
+    std::string joined;
+    for (size_t i = 0; i < queue.size(); ++i)
+    {
+        if (i > 0) joined += ", ";
+        joined += queue[i];
+    }
+    if (joined.empty()) joined = "empty";
+
+    recordEvent("READY_QUEUE", "", "Ready queue: [" + joined + "]");
+}
+
+void SimulationEngine::resetSchedulingTelemetry()
+{
+    timeline.clear();
+    tickEvents.clear();
+    lastReadyQueue.clear();
+    lastProcessStates.clear();
+    contextSwitches = 0;
+    busyTicks = 0;
+    idleTicks = 0;
+    lastDispatchReason.clear();
+}
+
 Process& SimulationEngine::addProcess(
     const std::string& name,
     int priority,
     int arrivalTime,
     int burstTime,
-    int memoryRequired
+    int memoryRequired,
+    int weight
 )
 {
     Process& proc = processManager.createProcess(
@@ -61,7 +151,8 @@ Process& SimulationEngine::addProcess(
         priority,
         arrivalTime,
         burstTime,
-        memoryRequired
+        memoryRequired,
+        weight
     );
     checkPendingProcesses();
     return proc;
@@ -247,6 +338,8 @@ bool SimulationEngine::renameFile(const std::string& fileId, const std::string& 
 void SimulationEngine::setScheduler(Scheduler& newScheduler)
 {
     this->scheduler = &newScheduler;
+    this->scheduler->reset();
+    this->lastDispatchReason.clear();
 }
 
 void SimulationEngine::setMemoryManager(MemoryManager& newMemoryManager)
@@ -328,6 +421,8 @@ void SimulationEngine::checkPendingProcesses()
 
 bool SimulationEngine::step()
 {
+    tickEvents.clear();
+
     // Check termination condition
     auto allProcesses = processManager.getAllProcesses();
     bool allTerminated = true;
@@ -352,52 +447,172 @@ bool SimulationEngine::step()
 
     // 2. Schedule
     std::string nextPID = scheduler->selectNextProcess(processManager.getAllProcesses()).PID;
+    lastDispatchReason = scheduler->getDecisionReason();
 
     if (nextPID != "INVALID")
     {
         Process* processToRun = processManager.getProcess(nextPID);
-        lastExecutedPID = nextPID;
 
-        log("CPU running process " + nextPID + " (Remaining: " +
-            std::to_string(processToRun->getRemainingTime()) + ")");
-
-        cpu.execute(*processToRun, 1);
-
-        if (pagingManager && processToRun->getMemoryRequired() > 0)
+        if (processToRun == nullptr)
         {
-            int executedUnits = processToRun->getBurstTime() - processToRun->getRemainingTime();
-            int memReq = processToRun->getMemoryRequired();
-            int logicalAddr = (executedUnits * 4) % memReq;
-            auto trans = pagingManager->accessAddress(nextPID, logicalAddr, currentTick);
-            if (trans.pageFault)
-            {
-                log("Page fault for " + nextPID + " at logical addr " + std::to_string(logicalAddr) +
-                    " -> loaded into frame " + std::to_string(trans.frameNumber));
-            }
+            lastExecutedPID = "IDLE";
+            lastDispatchPID = "IDLE";
+            log("Scheduler selected a missing process " + nextPID);
         }
-
-        // 3. On termination: free memory AND file system resources
-        if (processToRun->getState() == "TERMINATED")
+        else
         {
-            log("Process " + nextPID + " completed -> freeing memory and files");
-            memoryManager->deallocate(nextPID);
-            if (pagingManager)
-            {
-                pagingManager->deallocateProcess(nextPID);
-            }
-            fileSystem->handleProcessTermination(nextPID);
+            const std::string previousPID = lastDispatchPID;
+            const int sliceStart = currentTick;
+            const int sliceEnd = currentTick + 1;
 
-            // Re-check blocked processes now that memory may have freed up
-            checkPendingProcesses();
+            // 3. Dispatch / context-switch telemetry. Only emit when the CPU
+            //    actually changes owner, so repeated ticks are not duplicated.
+            if (nextPID != previousPID)
+            {
+                Process* previousProcess = nullptr;
+                if (previousPID != "NONE" && previousPID != "IDLE")
+                {
+                    previousProcess = processManager.getProcess(previousPID);
+                }
+
+                if (previousProcess != nullptr)
+                {
+                    contextSwitches++;
+
+                    // "Preempted" only makes sense when the previous owner is
+                    // still runnable. A completed process is a context switch,
+                    // not a preemption.
+                    if (previousProcess->getState() == "READY")
+                    {
+                        recordEvent(
+                            "PREEMPTED",
+                            previousPID,
+                            "PID " + previousPID + " preempted by " + nextPID
+                        );
+                    }
+
+                    recordEvent(
+                        "CONTEXT_SWITCH",
+                        nextPID,
+                        "Context switch: " + previousPID + " -> " + nextPID
+                    );
+                }
+
+                recordEvent(
+                    "PROCESS_SELECTED",
+                    nextPID,
+                    lastDispatchReason.empty()
+                        ? ("PID " + nextPID + " selected by " + schedulerName)
+                        : lastDispatchReason
+                );
+                recordEvent(
+                    "CPU_STARTED",
+                    nextPID,
+                    "CPU started PID " + nextPID + " (" + processToRun->getName() + ")"
+                );
+            }
+
+            processToRun->markFirstRun(currentTick);
+
+            log("CPU running process " + nextPID + " (Remaining: " +
+                std::to_string(processToRun->getRemainingTime()) + ")");
+
+            cpu.execute(*processToRun, 1);
+            busyTicks++;
+
+            // 4. Merge consecutive ticks of the same PID into one Gantt slice.
+            if (!timeline.empty() &&
+                timeline.back().pid == nextPID &&
+                timeline.back().end == sliceStart)
+            {
+                timeline.back().end = sliceEnd;
+                timeline.back().duration += 1;
+            }
+            else
+            {
+                ExecutionSlice slice;
+                slice.pid = nextPID;
+                slice.name = processToRun->getName();
+                slice.start = sliceStart;
+                slice.end = sliceEnd;
+                slice.duration = 1;
+                timeline.push_back(slice);
+            }
+
+            processToRun->addCpuTime(1);
+
+            // 5. Let stateful schedulers (CFS) account for executed CPU time.
+            scheduler->onProcessExecuted(*processToRun, 1);
+
+            if (schedulerName == "CFS")
+            {
+                std::ostringstream vr;
+                vr << std::fixed << std::setprecision(2);
+                vr << "PID " << nextPID << " vruntime -> " << processToRun->getVruntime();
+                recordEvent("VRUNTIME", nextPID, vr.str());
+            }
+
+            lastExecutedPID = nextPID;
+            lastDispatchPID = nextPID;
+
+            if (pagingManager && processToRun->getMemoryRequired() > 0)
+            {
+                int executedUnits = processToRun->getBurstTime() - processToRun->getRemainingTime();
+                int memReq = processToRun->getMemoryRequired();
+                int logicalAddr = (executedUnits * 4) % memReq;
+                auto trans = pagingManager->accessAddress(nextPID, logicalAddr, currentTick);
+                if (trans.pageFault)
+                {
+                    log("Page fault for " + nextPID + " at logical addr " + std::to_string(logicalAddr) +
+                        " -> loaded into frame " + std::to_string(trans.frameNumber));
+                }
+            }
+
+            // 6. On termination: free memory AND file system resources
+            if (processToRun->getState() == "TERMINATED")
+            {
+                processToRun->markCompleted(sliceEnd);
+                scheduler->onProcessCompleted(*processToRun);
+
+                recordEvent(
+                    "COMPLETED",
+                    nextPID,
+                    "PID " + nextPID + " completed at tick " + std::to_string(sliceEnd) +
+                        " (burst " + std::to_string(processToRun->getBurstTime()) + ")"
+                );
+
+                log("Process " + nextPID + " completed -> freeing memory and files");
+                memoryManager->deallocate(nextPID);
+                if (pagingManager)
+                {
+                    pagingManager->deallocateProcess(nextPID);
+                }
+                fileSystem->handleProcessTermination(nextPID);
+
+                // The CPU is free after the completion; the next tick will
+                // dispatch the next process. Do not report a terminated PID as
+                // the active CPU in telemetry.
+                lastExecutedPID = "IDLE";
+
+                // Re-check blocked processes now that memory may have freed up
+                checkPendingProcesses();
+            }
         }
     }
     else
     {
         lastExecutedPID = "IDLE";
+        lastDispatchPID = "IDLE";
+        idleTicks++;
         log("CPU is idle (No READY processes)");
     }
 
     currentTick++;
+
+    // 7. Publish state/queue transitions once per tick.
+    recordReadyQueueChange();
+    recordStateChanges();
+
     return true;
 }
 
@@ -410,6 +625,7 @@ void SimulationEngine::reset()
 {
     currentTick = 0;
     lastExecutedPID = "NONE";
+    lastDispatchPID = "NONE";
     systemLogs.clear();
     processManager.clear();
     memoryManager->reset();
@@ -419,7 +635,53 @@ void SimulationEngine::reset()
     }
     fileSystem->reset();
     scheduler->reset();
+    resetSchedulingTelemetry();
     log("Simulation reset to initial state");
+}
+
+void SimulationEngine::resetStatistics()
+{
+    scheduler->reset();
+    resetSchedulingTelemetry();
+
+    for (Process* process : processManager.getAllProcesses())
+    {
+        process->resetSchedulingStats();
+    }
+
+    lastExecutedPID = "NONE";
+    lastDispatchPID = "NONE";
+    log("Scheduling statistics reset");
+}
+
+void SimulationEngine::restartRun()
+{
+    // Rewind clock and telemetry, then return every process to its initial
+    // execution state. Memory is released first so admission control can
+    // allocate it again through the same arrival path as a fresh simulation.
+    currentTick = 0;
+    lastExecutedPID = "NONE";
+    lastDispatchPID = "NONE";
+    systemLogs.clear();
+    scheduler->reset();
+    resetSchedulingTelemetry();
+
+    for (Process* process : processManager.getAllProcesses())
+    {
+        memoryManager->deallocate(process->getPID());
+        if (pagingManager)
+        {
+            pagingManager->deallocateProcess(process->getPID());
+        }
+        process->resetForRestart();
+    }
+
+    // Admit processes whose arrival time is 0 (the rest stay NEW until their
+    // arrival is reached by the clock).
+    checkPendingProcesses();
+
+    log("Simulation run restarted from tick 0 with " +
+        std::to_string(processManager.getAllProcesses().size()) + " process(es)");
 }
 
 bool SimulationEngine::killProcess(const std::string& pid)
@@ -431,9 +693,15 @@ bool SimulationEngine::killProcess(const std::string& pid)
         p->execute(p->getRemainingTime());
     }
     p->setState(ProcessState::TERMINATED);
+    p->markCompleted(currentTick);
+    scheduler->onProcessCompleted(*p);
     if (lastExecutedPID == pid)
     {
         lastExecutedPID = "IDLE";
+    }
+    if (lastDispatchPID == pid)
+    {
+        lastDispatchPID = "IDLE";
     }
     memoryManager->deallocate(pid);
     if (pagingManager)
@@ -441,8 +709,11 @@ bool SimulationEngine::killProcess(const std::string& pid)
         pagingManager->deallocateProcess(pid);
     }
     fileSystem->handleProcessTermination(pid);
+    recordEvent("COMPLETED", pid, "PID " + pid + " terminated by user at tick " + std::to_string(currentTick));
     log("Process " + pid + " terminated");
     checkPendingProcesses();
+    recordReadyQueueChange();
+    recordStateChanges();
     return true;
 }
 
@@ -462,12 +733,18 @@ bool SimulationEngine::removeProcess(const std::string& pid)
     {
         lastExecutedPID = "NONE";
     }
+    if (lastDispatchPID == pid)
+    {
+        lastDispatchPID = "NONE";
+    }
 
     bool removed = processManager.removeProcess(pid);
     if (removed)
     {
+        lastProcessStates.erase(pid);
         log("Process " + pid + " removed from the process table");
         checkPendingProcesses();
+        recordReadyQueueChange();
     }
     return removed;
 }
@@ -500,6 +777,103 @@ static std::string jsonEscape(const std::string& s)
 
 // ── Telemetry ─────────────────────────────────────────────────────────────────
 
+std::string SimulationEngine::timelineJson() const
+{
+    std::ostringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < timeline.size(); ++i)
+    {
+        const ExecutionSlice& slice = timeline[i];
+        ss << "{\"pid\":\"" << jsonEscape(slice.pid) << "\","
+           << "\"name\":\"" << jsonEscape(slice.name) << "\","
+           << "\"start\":" << slice.start << ","
+           << "\"end\":" << slice.end << ","
+           << "\"duration\":" << slice.duration << "}";
+        if (i + 1 < timeline.size()) ss << ",";
+    }
+    ss << "]";
+    return ss.str();
+}
+
+std::string SimulationEngine::eventsJson() const
+{
+    std::ostringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < tickEvents.size(); ++i)
+    {
+        const SimulationEvent& event = tickEvents[i];
+        ss << "{\"seq\":" << event.seq << ","
+           << "\"tick\":" << event.tick << ","
+           << "\"type\":\"" << jsonEscape(event.type) << "\","
+           << "\"pid\":\"" << jsonEscape(event.pid) << "\","
+           << "\"message\":\"" << jsonEscape(event.message) << "\"}";
+        if (i + 1 < tickEvents.size()) ss << ",";
+    }
+    ss << "]";
+    return ss.str();
+}
+
+std::string SimulationEngine::readyQueueJson() const
+{
+    std::ostringstream ss;
+    ss << "[";
+    bool first = true;
+    for (const Process* process : processManager.getAllProcesses())
+    {
+        if (process->getState() != "READY")
+        {
+            continue;
+        }
+        if (!first) ss << ",";
+        first = false;
+        ss << "\"" << jsonEscape(process->getPID()) << "\"";
+    }
+    ss << "]";
+    return ss.str();
+}
+
+std::string SimulationEngine::metricsJson() const
+{
+    int completed = 0;
+    double waitingTotal = 0.0;
+    double turnaroundTotal = 0.0;
+    double responseTotal = 0.0;
+
+    for (const Process* process : processManager.getAllProcesses())
+    {
+        if (process->getCompletionTime() < 0)
+        {
+            continue;
+        }
+        completed++;
+        waitingTotal += process->getWaitingTime();
+        turnaroundTotal += process->getTurnaroundTime();
+        responseTotal += process->getResponseTime();
+    }
+
+    const double averageWaiting = completed > 0 ? waitingTotal / completed : 0.0;
+    const double averageTurnaround = completed > 0 ? turnaroundTotal / completed : 0.0;
+    const double averageResponse = completed > 0 ? responseTotal / completed : 0.0;
+    const double cpuUtilization = currentTick > 0
+        ? (100.0 * static_cast<double>(busyTicks) / static_cast<double>(currentTick))
+        : 0.0;
+
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(2);
+    ss << "{"
+       << "\"averageWaiting\":" << averageWaiting << ","
+       << "\"averageTurnaround\":" << averageTurnaround << ","
+       << "\"averageResponse\":" << averageResponse << ","
+       << "\"cpuUtilization\":" << cpuUtilization << ","
+       << "\"contextSwitches\":" << contextSwitches << ","
+       << "\"completedProcesses\":" << completed << ","
+       << "\"totalProcesses\":" << processManager.getAllProcesses().size() << ","
+       << "\"busyTicks\":" << busyTicks << ","
+       << "\"idleTicks\":" << idleTicks
+       << "}";
+    return ss.str();
+}
+
 std::string SimulationEngine::getTelemetryJson() const
 {
     std::ostringstream ss;
@@ -507,10 +881,24 @@ std::string SimulationEngine::getTelemetryJson() const
     // isIdle is true whenever there is no running process
     bool isIdle = (lastExecutedPID == "IDLE" || lastExecutedPID == "NONE");
 
+    auto procs = processManager.getAllProcesses();
+
+    std::string activeName = "IDLE";
+    for (const Process* process : procs)
+    {
+        if (process->getPID() == lastExecutedPID)
+        {
+            activeName = process->getName();
+            break;
+        }
+    }
+
     ss << "{\"tick\":" << currentTick << ",";
 
     // CPU
-    ss << "\"cpu\":{\"activePID\":\"" << jsonEscape(lastExecutedPID) << "\",\"isIdle\":" << (isIdle ? "true" : "false") << "},";
+    ss << "\"cpu\":{\"activePID\":\"" << jsonEscape(lastExecutedPID) << "\","
+       << "\"activeName\":\"" << jsonEscape(activeName) << "\","
+       << "\"isIdle\":" << (isIdle ? "true" : "false") << "},";
 
     // Active config (scheduler + alloc strategy)
     ss << "\"config\":{"
@@ -518,12 +906,18 @@ std::string SimulationEngine::getTelemetryJson() const
        << "\"quantum\":" << schedulerQuantum << ","
        << "\"allocStrategy\":\"" << jsonEscape(allocName) << "\"},";
 
+    // Scheduler-specific live state (CFS virtual runtime bookkeeping)
+    if (schedulerName == "CFS")
+    {
+        ss << "\"cfs\":" << scheduler->getTelemetryJson() << ",";
+    }
+
     // Processes array
     ss << "\"processes\":[";
-    auto procs = processManager.getAllProcesses();
     for (size_t i = 0; i < procs.size(); ++i)
     {
         const auto* p = procs[i];
+        ss << std::fixed << std::setprecision(2);
         ss << "{\"pid\":\"" << jsonEscape(p->getPID()) << "\","
            << "\"name\":\"" << jsonEscape(p->getName()) << "\","
            << "\"state\":\"" << jsonEscape(p->getState()) << "\","
@@ -531,10 +925,24 @@ std::string SimulationEngine::getTelemetryJson() const
            << "\"arrivalTime\":" << p->getArrivalTime() << ","
            << "\"burstTime\":" << p->getBurstTime() << ","
            << "\"remainingTime\":" << p->getRemainingTime() << ","
-           << "\"memoryRequired\":" << p->getMemoryRequired() << "}";
+           << "\"memoryRequired\":" << p->getMemoryRequired() << ","
+           << "\"weight\":" << p->getWeight() << ","
+           << "\"vruntime\":" << p->getVruntime() << ","
+           << "\"firstRunTime\":" << p->getFirstRunTime() << ","
+           << "\"completionTime\":" << p->getCompletionTime() << ","
+           << "\"cpuTime\":" << p->getTotalCpuTime() << ","
+           << "\"waitingTime\":" << p->getWaitingTime() << ","
+           << "\"turnaroundTime\":" << p->getTurnaroundTime() << ","
+           << "\"responseTime\":" << p->getResponseTime() << "}";
         if (i + 1 < procs.size()) ss << ",";
     }
     ss << "],";
+
+    // Scheduling telemetry
+    ss << "\"readyQueue\":" << readyQueueJson() << ",";
+    ss << "\"timeline\":" << timelineJson() << ",";
+    ss << "\"events\":" << eventsJson() << ",";
+    ss << "\"metrics\":" << metricsJson() << ",";
 
     // Memory
     ss << "\"memory\":" << memoryManager->getSnapshotAsJson() << ",";

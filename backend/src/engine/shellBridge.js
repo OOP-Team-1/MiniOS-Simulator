@@ -69,17 +69,18 @@ export function handleKernelCommand(commandLine) {
         case 'spawn': {
             const name = String(tokens[1] ?? '').replace(/[^a-zA-Z0-9_-]/g, '');
             if (!name) {
-                return { handled: true, output: 'spawn: usage: spawn <name> [priority] [arrival] [burst] [memory]\n' };
+                return { handled: true, output: 'spawn: usage: spawn <name> [priority] [arrival] [burst] [memory] [weight]\n' };
             }
             const priority = parseInt(tokens[2], 10) || 1;
             const arrival = parseInt(tokens[3], 10) || 0;
             const burst = parseInt(tokens[4], 10) || 5;
             const memory = parseInt(tokens[5], 10) || 10;
+            const weight = Math.min(100, Math.max(1, parseInt(tokens[6], 10) || 10));
 
-            sendCommand(`ADD ${name} ${priority} ${arrival} ${burst} ${memory}`);
+            sendCommand(`ADD ${name} ${priority} ${arrival} ${burst} ${memory} ${weight}`);
             return {
                 handled: true,
-                output: `Spawned process '${name}' (priority ${priority}, burst ${burst}, memory ${memory}).\n`
+                output: `Spawned process '${name}' (priority ${priority}, burst ${burst}, memory ${memory}, weight ${weight}).\n`
             };
         }
 

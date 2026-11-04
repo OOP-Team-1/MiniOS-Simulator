@@ -8,6 +8,7 @@
 #include <vector>
 #include <memory>
 #include <map>
+#include <algorithm>
 
 #include "../include/SimulationEngine.h"
 #include "../include/MemoryManager.h"
@@ -25,6 +26,7 @@
 #include "../include/SRTFScheduler.h"
 #include "../include/PriorityScheduler.h"
 #include "../include/RoundRobinScheduler.h"
+#include "../include/CFSScheduler.h"
 
 using namespace std;
 
@@ -65,6 +67,7 @@ int main()
     SRTFScheduler srtf;
     PriorityScheduler priority;
     RoundRobinScheduler roundRobin(2);
+    CFSScheduler cfs(24.0, 3.0, 10.0);
 
     // Core managers
     MemoryManager memoryManager(100, firstFit);
@@ -127,6 +130,14 @@ int main()
             {
                 engine.reset();
             }
+            else if (cmd == "RESET_STATS")
+            {
+                engine.resetStatistics();
+            }
+            else if (cmd == "RESTART_RUN")
+            {
+                engine.restartRun();
+            }
             else if (cmd == "COMPACT")
             {
                 engine.compactMemory();
@@ -137,7 +148,8 @@ int main()
             }
             else if (cmd == "ADD" && tok.size() >= 6)
             {
-                engine.addProcess(tok[1], std::stoi(tok[2]), std::stoi(tok[3]), std::stoi(tok[4]), std::stoi(tok[5]));
+                const int weight = (tok.size() >= 7) ? std::stoi(tok[6]) : 10;
+                engine.addProcess(tok[1], std::stoi(tok[2]), std::stoi(tok[3]), std::stoi(tok[4]), std::stoi(tok[5]), weight);
             }
             else if (cmd == "KILL" && tok.size() >= 2)
             {
@@ -155,6 +167,17 @@ int main()
                 else if (type == "SRTF") { engine.setScheduler(srtf); engine.setCurrentSchedulerName("SRTF", 0); }
                 else if (type == "PRIORITY") { engine.setScheduler(priority); engine.setCurrentSchedulerName("PRIORITY", 0); }
                 else if (type == "RR") { int quantum = (tok.size() >= 3) ? std::stoi(tok[2]) : 2; roundRobin = RoundRobinScheduler(quantum); engine.setScheduler(roundRobin); engine.setCurrentSchedulerName("RR", quantum); }
+                else if (type == "CFS")
+                {
+                    double latency = (tok.size() >= 3) ? std::stod(tok[2]) : 24.0;
+                    double granularity = (tok.size() >= 4) ? std::stod(tok[3]) : 3.0;
+                    latency = std::max(1.0, latency);
+                    granularity = std::max(1.0, std::min(granularity, latency));
+                    cfs.setParameters(latency, granularity);
+                    cfs.reset();
+                    engine.setScheduler(cfs);
+                    engine.setCurrentSchedulerName("CFS", static_cast<int>(latency));
+                }
             }
             else if (cmd == "SET_ALLOC" && tok.size() >= 2)
             {

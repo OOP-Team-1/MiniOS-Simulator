@@ -87,77 +87,6 @@ function getProcColor(pid) {
   return PROC_PALETTE[Math.abs(hash) % PROC_PALETTE.length];
 }
 
-function runSchedulingSimulation(processes, algorithm, quantum) {
-  const jobs = processes
-    .map((p) => ({ ...p, remaining: Math.max(1, Number(p.burst) || 1), start: null, completion: null, waiting: 0 }))
-    .sort((a, b) => (a.arrival || 0) - (b.arrival || 0) || String(a.pid).localeCompare(String(b.pid)));
-
-  if (!jobs.length) return { timeline: [], averageWaiting: 0, averageTurnaround: 0 };
-
-  const timeline = [];
-  let time = 0;
-  const completed = [];
-  const addSlice = (job, duration) => {
-    if (duration <= 0) return;
-    const start = time;
-    time += duration;
-    job.remaining -= duration;
-    timeline.push({ pid: job.pid, name: job.name, start, end: time, duration });
-  };
-
-  if (algorithm === 'RR') {
-    const pending = [...jobs];
-    const queue = [];
-    const q = Math.max(1, Number(quantum) || 1);
-    while (pending.length || queue.length) {
-      while (pending.length && (pending[0].arrival || 0) <= time) queue.push(pending.shift());
-      if (!queue.length) {
-        time = pending[0].arrival || time + 1;
-        continue;
-      }
-      const job = queue.shift();
-      if (job.start === null) job.start = time;
-      const slice = Math.min(q, job.remaining);
-      addSlice(job, slice);
-      while (pending.length && (pending[0].arrival || 0) <= time) queue.push(pending.shift());
-      if (job.remaining > 0) queue.push(job);
-      else {
-        job.completion = time;
-        completed.push(job);
-      }
-    }
-  } else {
-    const pending = [...jobs];
-    while (pending.length) {
-      const available = pending.filter((p) => (p.arrival || 0) <= time);
-      if (!available.length) {
-        time = pending[0].arrival || time + 1;
-        continue;
-      }
-      let selected;
-      if (algorithm === 'SJF') {
-        selected = available.sort((a, b) => a.burst - b.burst || (a.arrival || 0) - (b.arrival || 0))[0];
-      } else if (algorithm === 'PRIORITY') {
-        selected = available.sort((a, b) => a.priority - b.priority || (a.arrival || 0) - (b.arrival || 0))[0];
-      } else {
-        selected = available.sort((a, b) => (a.arrival || 0) - (b.arrival || 0))[0];
-      }
-      if (selected.start === null) selected.start = time;
-      addSlice(selected, selected.remaining);
-      selected.completion = time;
-      completed.push(selected);
-      pending.splice(pending.findIndex((p) => p.pid === selected.pid), 1);
-    }
-  }
-
-  const waitingTotal = completed.reduce((sum, p) => sum + Math.max(0, p.completion - (p.arrival || 0) - p.burst), 0);
-  const turnaroundTotal = completed.reduce((sum, p) => sum + (p.completion - (p.arrival || 0)), 0);
-  return {
-    timeline,
-    averageWaiting: (waitingTotal / completed.length).toFixed(1),
-    averageTurnaround: (turnaroundTotal / completed.length).toFixed(1),
-  };
-}
 
 function AppIcon({ app, size = 'md' }) {
   const Icon = app.icon;
@@ -196,6 +125,28 @@ function StatCard({ label, value, helper, icon: Icon }) {
   );
 }
 
+function formatMetric(value, suffix = '') {
+  if (value === '—' || value === null || value === undefined) return '—';
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return String(value);
+  return `${numeric.toFixed(2)}${suffix}`;
+}
+
+function formatIntegerMetric(value) {
+  if (value === '—' || value === null || value === undefined) return '—';
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? String(Math.round(numeric)) : String(value);
+}
+
+const SCHEDULER_OPTIONS = [
+  { value: 'FCFS', label: 'First Come, First Served (FCFS)' },
+  { value: 'SJF', label: 'Shortest Job First (SJF)' },
+  { value: 'SRTF', label: 'Shortest Remaining Time First (SRTF)' },
+  { value: 'PRIORITY', label: 'Priority (lower number first)' },
+  { value: 'RR', label: 'Round Robin (RR)' },
+  { value: 'CFS', label: 'Completely Fair Scheduler (CFS)' },
+];
+
 export default function App() {
   const [theme, setTheme] = useState('ocean');
   const [wallpaperImage, setWallpaperImage] = useState('/wallpaper.jpg');
@@ -228,19 +179,33 @@ export default function App() {
 
   const [processes, setProcesses] = useState([]);
   const [ganttTimeline, setGanttTimeline] = useState([]);
-  const [schedulerMetrics, setSchedulerMetrics] = useState({ averageWaiting: '—', averageTurnaround: '—' });
+  const [schedulerMetrics, setSchedulerMetrics] = useState({
+    averageWaiting: '—',
+    averageTurnaround: '—',
+    averageResponse: '—',
+    cpuUtilization: '—',
+    contextSwitches: '—',
+    completedProcesses: 0,
+  });
   const [schedulerLog, setSchedulerLog] = useState(['[system] Listening for C++ Engine telemetry...']);
+  const [readyQueue, setReadyQueue] = useState([]);
+  const [cfsState, setCfsState] = useState(null);
+  const [activeCpu, setActiveCpu] = useState({ pid: 'NONE', name: 'IDLE', isIdle: true });
 
   const [newProcName, setNewProcName] = useState('');
   const [newProcBurst, setNewProcBurst] = useState('10');
   const [newProcPriority, setNewProcPriority] = useState('1');
   const [newProcMemory, setNewProcMemory] = useState('10');
   const [newProcArrival, setNewProcArrival] = useState('0');
+  const [newProcWeight, setNewProcWeight] = useState('10');
   const [currentTick, setCurrentTick] = useState(0);
   const [isClockRunning, setIsClockRunning] = useState(false);
 
   const [schedAlgo, setSchedAlgo] = useState('RR');
   const [timeQuantum, setTimeQuantum] = useState(3);
+  const [targetLatency, setTargetLatency] = useState('24');
+  const [minGranularity, setMinGranularity] = useState('3');
+  const lastEventSeqRef = useRef(0);
 
   const [termInput, setTermInput] = useState('');
   const [termHistory, setTermHistory] = useState(['MINIOS shell 2.4.0', 'Type help to see supported commands.', '']);
@@ -298,7 +263,27 @@ export default function App() {
 
   useEffect(() => {
     socket.on('telemetry:update', (data) => {
-      if (data && data.processes) {
+      if (!data) return;
+
+      if (data.cpu) {
+        setActiveCpu({
+          pid: data.cpu.activePID ?? 'NONE',
+          name: data.cpu.activeName ?? 'IDLE',
+          isIdle: Boolean(data.cpu.isIdle),
+        });
+      }
+
+      if (data.config && data.config.allocStrategy) {
+        setActiveAllocStrategy(data.config.allocStrategy);
+      }
+
+      if (data.cfs) {
+        setCfsState(data.cfs);
+      } else if (data.config?.scheduler !== 'CFS') {
+        setCfsState(null);
+      }
+
+      if (data.processes) {
         const translatedProcesses = data.processes
           .map((p) => {
             const pid = p.pid ?? p.id ?? p.processId ?? '?';
@@ -312,14 +297,23 @@ export default function App() {
               priority: p.priority ?? 1,
               burst: p.burst ?? p.burstTime ?? p.burst_time ?? p.total_time ?? '?',
               remaining: rawState === 'TERMINATED' ? 0 : rawRemaining,
+              weight: Number(p.weight ?? 10),
+              vruntime: Number(p.vruntime ?? 0),
+              firstRunTime: Number(p.firstRunTime ?? -1),
+              completionTime: Number(p.completionTime ?? -1),
+              waitingTime: Number(p.waitingTime ?? 0),
+              turnaroundTime: Number(p.turnaroundTime ?? 0),
+              responseTime: Number(p.responseTime ?? 0),
             };
           })
           .filter((p) => !deletedPidsRef.current.has(p.pid));
 
         setProcesses(translatedProcesses);
 
-        if (typeof data.tick === 'number') {
-          setCurrentTick(data.tick);
+        if (Array.isArray(data.readyQueue)) {
+          setReadyQueue(data.readyQueue);
+        } else {
+          setReadyQueue(translatedProcesses.filter((p) => p.state === 'READY').map((p) => p.pid));
         }
 
         const allDone = translatedProcesses.length > 0 && translatedProcesses.every((p) => p.state === 'TERMINATED');
@@ -327,18 +321,37 @@ export default function App() {
           socket.emit('timer:pause');
           setIsClockRunning(false);
         }
+      }
 
-        if (data.timeline && data.timeline.length > 0) setGanttTimeline(data.timeline);
-        if (data.metrics && data.metrics.averageWaiting) {
-          setSchedulerMetrics({
-            averageWaiting: data.metrics.averageWaiting,
-            averageTurnaround: data.metrics.averageTurnaround,
-          });
+      if (typeof data.tick === 'number') {
+        setCurrentTick(data.tick);
+      }
+
+      if (Array.isArray(data.timeline)) {
+        setGanttTimeline(data.timeline);
+      }
+
+      if (data.metrics) {
+        setSchedulerMetrics(data.metrics);
+      }
+
+      // Scheduling decisions are produced by the C++ engine. Deduplicate by
+      // the engine-assigned sequence number so a repeated STATE snapshot never
+      // duplicates log lines.
+      if (Array.isArray(data.events) && data.events.length) {
+        const fresh = [];
+        for (const event of data.events) {
+          const seq = Number(event.seq ?? 0);
+          if (seq > lastEventSeqRef.current) {
+            lastEventSeqRef.current = seq;
+            fresh.push(`[t${event.tick}] ${event.message}`);
+          }
+        }
+        if (fresh.length) {
+          setSchedulerLog((previous) => [...fresh.reverse(), ...previous].slice(0, 120));
         }
       }
-      if (data.config && data.config.allocStrategy) {
-        setActiveAllocStrategy(data.config.allocStrategy);
-      }
+
       if (data.memory) {
         setMemoryStats(data.memory);
       }
@@ -370,9 +383,13 @@ export default function App() {
 
     socket.on('engine:restarted', (data) => {
       deletedPidsRef.current.clear();
+      lastEventSeqRef.current = 0;
       setToast(data.message);
       setProcesses([]);
       setGanttTimeline([]);
+      setReadyQueue([]);
+      setCfsState(null);
+      setActiveCpu({ pid: 'NONE', name: 'IDLE', isIdle: true });
     });
 
     socket.on('engine:command_error', (data) => {
@@ -546,6 +563,17 @@ export default function App() {
     [processes]
   );
   const activeProcesses = processes.filter((p) => p.state === 'READY' || p.state === 'RUNNING').length;
+  const activeProcess = activeCpu.isIdle ? null : processes.find((p) => p.pid === activeCpu.pid) || null;
+  const readyQueueProcesses = readyQueue
+    .map((pid) => processes.find((p) => p.pid === pid))
+    .filter(Boolean);
+  const orderedReadyProcesses = schedAlgo === 'CFS'
+    ? [...readyQueueProcesses].sort((a, b) => a.vruntime - b.vruntime || a.pid.localeCompare(b.pid))
+    : readyQueueProcesses;
+  const vruntimeProcesses = [...processes]
+    .filter((p) => p.state !== 'TERMINATED' || p.vruntime > 0)
+    .sort((a, b) => a.vruntime - b.vruntime || a.pid.localeCompare(b.pid));
+  const maxVruntime = Math.max(1, ...vruntimeProcesses.map((p) => Number(p.vruntime) || 0));
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const filteredApps = useMemo(() => INITIAL_APPS.filter((app) => `${app.title} ${app.subtitle}`.toLowerCase().includes(normalizedSearch)), [normalizedSearch]);
   const filteredWindows = useMemo(() => windows.filter((win) => win.isOpen && win.title.toLowerCase().includes(normalizedSearch)), [windows, normalizedSearch]);
@@ -669,6 +697,19 @@ export default function App() {
     deletedPidsRef.current.clear();
     socket.emit('cmd:reset');
     setIsClockRunning(false);
+    setGanttTimeline([]);
+    setReadyQueue([]);
+    setCfsState(null);
+    setActiveCpu({ pid: 'NONE', name: 'IDLE', isIdle: true });
+    setSchedulerLog(['[system] Simulation reset. Listening for C++ Engine telemetry...']);
+    setSchedulerMetrics({
+      averageWaiting: '—',
+      averageTurnaround: '—',
+      averageResponse: '—',
+      cpuUtilization: '—',
+      contextSwitches: '—',
+      completedProcesses: 0,
+    });
     setToast('Simulation reset to Tick 0.');
   };
 
@@ -679,6 +720,7 @@ export default function App() {
     const priority = Number.parseInt(newProcPriority, 10);
     const memory = Number.parseInt(newProcMemory, 10);
     const arrival = Number.parseInt(newProcArrival, 10);
+    const weight = Number.parseInt(newProcWeight, 10);
 
     if (!name) return setToast('Enter a process name first.');
     if (!Number.isFinite(burst) || burst < 1) return setToast('Burst time must be at least 1.');
@@ -690,6 +732,7 @@ export default function App() {
       priority: Number.isFinite(priority) ? priority : 1,
       arrival: Number.isFinite(arrival) ? arrival : 0,
       memory,
+      weight: Number.isFinite(weight) && weight > 0 ? weight : 10,
     });
 
     setNewProcName('');
@@ -750,21 +793,61 @@ export default function App() {
   };
 
   const runSchedulerSimulation = () => {
-    const activeProcs = processes.filter((p) => p.state !== 'TERMINATED');
-    const simResults = runSchedulingSimulation(activeProcs, schedAlgo, timeQuantum);
+    if (!processes.length) {
+      setToast('Create at least one process before running a simulation.');
+      return;
+    }
 
-    setGanttTimeline(simResults.timeline);
-    setSchedulerMetrics({
-      averageWaiting: simResults.averageWaiting,
-      averageTurnaround: simResults.averageTurnaround,
+    const latency = Math.max(1, Number(targetLatency) || 24);
+    const granularity = Math.min(latency, Math.max(1, Number(minGranularity) || 3));
+
+    // The C++ engine owns every scheduling decision. RESTART_RUN rewinds the
+    // current process table to tick 0 (restoring bursts and re-admitting
+    // processes) so the same workload can be compared across algorithms.
+    socket.emit('cmd:restart_run');
+    socket.emit('cmd:set_scheduler', {
+      type: schedAlgo,
+      quantum: timeQuantum,
+      targetLatency: latency,
+      minGranularity: granularity,
     });
 
-    socket.emit('cmd:set_scheduler', { type: schedAlgo, quantum: timeQuantum });
+    setGanttTimeline([]);
+    setReadyQueue([]);
+    setCfsState(null);
+    setActiveCpu({ pid: 'NONE', name: 'IDLE', isIdle: true });
+    setSchedulerMetrics({
+      averageWaiting: '—',
+      averageTurnaround: '—',
+      averageResponse: '—',
+      cpuUtilization: '—',
+      contextSwitches: '—',
+      completedProcesses: 0,
+    });
+    setSchedulerLog([
+      `[dispatch] ${schedAlgo} selected${schedAlgo === 'CFS' ? ` (latency ${latency}, granularity ${granularity})` : schedAlgo === 'RR' ? ` (quantum ${timeQuantum})` : ''}. Engine clock started.`,
+    ]);
     socket.emit('timer:start', { intervalMs: 1000 });
     setIsClockRunning(true);
+    setToast(`${schedAlgo} simulation started from the C++ engine.`);
+  };
 
-    setSchedulerLog((prev) => [`[dispatch] Selected ${schedAlgo}. Auto-stepping started.`, ...prev].slice(0, 12));
-    setToast('Simulation completed visuals & backend clock started...');
+  const resetSchedulerStats = () => {
+    socket.emit('cmd:reset_stats');
+    setGanttTimeline([]);
+    setReadyQueue([]);
+    setCfsState(null);
+    setActiveCpu({ pid: 'NONE', name: 'IDLE', isIdle: true });
+    setSchedulerLog(['[system] Scheduling statistics cleared.']);
+    setSchedulerMetrics({
+      averageWaiting: '—',
+      averageTurnaround: '—',
+      averageResponse: '—',
+      cpuUtilization: '—',
+      contextSwitches: '—',
+      completedProcesses: 0,
+    });
+    setToast('Scheduling statistics cleared.');
   };
 
   const navigateToDir = (dirId) => {
@@ -1252,17 +1335,13 @@ export default function App() {
                           <span className={`ml-1.5 inline-block h-2 w-2 rounded-full ${isClockRunning ? 'animate-pulse bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : 'bg-slate-500'}`} />
                           <span className="text-[10px] text-slate-400">{isClockRunning ? 'Running' : 'Paused'}</span>
                         </div>
-                        {(() => {
-                          const runningProc = processes.find((p) => p.state === 'RUNNING');
-                          if (runningProc) {
-                            return <span className="rounded-md border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] text-emerald-300"><span className="text-emerald-400">CPU:</span> {runningProc.name} ({runningProc.pid})</span>;
-                          }
-                          const readyProcs = processes.filter((p) => p.state === 'READY');
-                          if (readyProcs.length) {
-                            return <span className="rounded-md border border-amber-400/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300"><span className="text-amber-400">Next:</span> {readyProcs[0].name} ({readyProcs[0].pid})</span>;
-                          }
-                          return <span className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-[11px] text-slate-500">CPU: Idle</span>;
-                        })()}
+                        {!activeCpu.isIdle ? (
+                          <span className="rounded-md border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] text-emerald-300"><span className="text-emerald-400">CPU:</span> {activeProcess?.name ?? activeCpu.name} ({activeCpu.pid})</span>
+                        ) : orderedReadyProcesses.length ? (
+                          <span className="rounded-md border border-amber-400/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300"><span className="text-amber-400">Next:</span> {orderedReadyProcesses[0].name} ({orderedReadyProcesses[0].pid})</span>
+                        ) : (
+                          <span className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-[11px] text-slate-500">CPU: Idle</span>
+                        )}
                         <button
                           onClick={stepSimulation}
                           title="Advance simulation clock by 1 tick"
@@ -1297,9 +1376,9 @@ export default function App() {
                     </h3>
                   </div>
                   <div className="overflow-x-auto rounded-xl border border-white/[0.08]">
-                    <table className="w-full min-w-[690px] text-left text-xs">
+                    <table className="w-full min-w-[780px] text-left text-xs">
                       <thead className="bg-white/[0.035] text-[10px] uppercase tracking-[0.11em] text-slate-500">
-                        <tr>{['PID', 'Process', 'State', 'Priority', 'Burst', 'Remaining', 'Actions'].map((heading) => <th key={heading} className={`px-3.5 py-3 font-medium ${heading === 'Actions' ? 'text-right' : ''}`}>{heading}</th>)}</tr>
+                        <tr>{['PID', 'Process', 'State', 'Priority', 'Weight', 'Burst', 'Remaining', 'Actions'].map((heading) => <th key={heading} className={`px-3.5 py-3 font-medium ${heading === 'Actions' ? 'text-right' : ''}`}>{heading}</th>)}</tr>
                       </thead>
                       <tbody className="divide-y divide-white/[0.055]">
                         {nonTerminatedProcesses.map((process) => (
@@ -1320,6 +1399,7 @@ export default function App() {
                               </span>
                             </td>
                             <td className="px-3.5 py-3 font-mono text-slate-400">{process.priority}</td>
+                            <td className="px-3.5 py-3 font-mono text-slate-400">{process.weight}</td>
                             <td className="px-3.5 py-3 font-mono text-slate-400">{process.burst}u</td>
                             <td className="px-3.5 py-3 font-mono text-slate-300">{process.remaining}u</td>
                             <td className="px-3.5 py-3 text-right">
@@ -1345,7 +1425,7 @@ export default function App() {
                           </tr>
                         ))}
                         {!nonTerminatedProcesses.length && (
-                          <tr><td colSpan="7" className="px-4 py-8 text-center text-slate-500">No active processes. Create one below.</td></tr>
+                          <tr><td colSpan="8" className="px-4 py-8 text-center text-slate-500">No active processes. Create one below.</td></tr>
                         )}
                       </tbody>
                     </table>
@@ -1367,9 +1447,9 @@ export default function App() {
                       )}
                     </div>
                     <div className="overflow-x-auto rounded-xl border border-white/[0.08] bg-black/20">
-                      <table className="w-full min-w-[690px] text-left text-xs">
+                      <table className="w-full min-w-[780px] text-left text-xs">
                         <thead className="bg-white/[0.025] text-[10px] uppercase tracking-[0.11em] text-slate-500">
-                          <tr>{['PID', 'Process', 'State', 'Priority', 'Burst', 'Remaining', 'Delete'].map((heading) => <th key={heading} className={`px-3.5 py-2.5 font-medium ${heading === 'Delete' ? 'text-right' : ''}`}>{heading}</th>)}</tr>
+                          <tr>{['PID', 'Process', 'State', 'Priority', 'Weight', 'Burst', 'Remaining', 'Delete'].map((heading) => <th key={heading} className={`px-3.5 py-2.5 font-medium ${heading === 'Delete' ? 'text-right' : ''}`}>{heading}</th>)}</tr>
                         </thead>
                         <tbody className="divide-y divide-white/[0.045]">
                           {terminatedProcesses.map((process) => (
@@ -1382,6 +1462,7 @@ export default function App() {
                                 </span>
                               </td>
                               <td className="px-3.5 py-2.5 font-mono text-slate-500">{process.priority}</td>
+                              <td className="px-3.5 py-2.5 font-mono text-slate-500">{process.weight}</td>
                               <td className="px-3.5 py-2.5 font-mono text-slate-500">{process.burst}u</td>
                               <td className="px-3.5 py-2.5 font-mono text-slate-500">0u</td>
                               <td className="px-3.5 py-2.5 text-right">
@@ -1397,7 +1478,7 @@ export default function App() {
                             </tr>
                           ))}
                           {!terminatedProcesses.length && (
-                            <tr><td colSpan="7" className="px-4 py-6 text-center text-slate-500">No terminated processes yet.</td></tr>
+                            <tr><td colSpan="8" className="px-4 py-6 text-center text-slate-500">No terminated processes yet.</td></tr>
                           )}
                         </tbody>
                       </table>
@@ -1414,24 +1495,27 @@ export default function App() {
                         Arrival 0 admits immediately once simulation steps (Current Tick: {currentTick})
                       </span>
                     </div>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_85px_85px_85px_85px_auto_auto]">
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                       <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Name</span><input value={newProcName} onChange={(e) => setNewProcName(e.target.value)} placeholder="e.g. worker_job" className="field w-full" /></label>
                       <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Burst (u)</span><input type="number" min="1" value={newProcBurst} onChange={(e) => setNewProcBurst(e.target.value)} className="field w-full" /></label>
                       <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">RAM (MB)</span><input type="number" min="1" value={newProcMemory} onChange={(e) => setNewProcMemory(e.target.value)} className="field w-full" /></label>
                       <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Priority</span><input type="number" min="0" value={newProcPriority} onChange={(e) => setNewProcPriority(e.target.value)} className="field w-full" /></label>
                       <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Arrival</span><input type="number" min="0" value={newProcArrival} onChange={(e) => setNewProcArrival(e.target.value)} className="field w-full" /></label>
-                      <button type="submit" className="self-end rounded-lg bg-slate-100 px-3.5 py-2.5 text-xs font-semibold text-slate-900 transition hover:bg-white"><Plus className="mr-1 inline h-3.5 w-3.5" />Create</button>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          addProcess(e);
-                          setTimeout(() => socket.emit('cmd:step'), 150);
-                        }}
-                        title="Create process and advance clock by 1 tick immediately"
-                        className="self-end rounded-lg border border-sky-400/30 bg-sky-500/20 px-3.5 py-2.5 text-xs font-semibold text-sky-200 transition hover:bg-sky-500/30"
-                      >
-                        <Play className="mr-1 inline h-3.5 w-3.5" />Create & Step
-                      </button>
+                      <label className="block"><span className="mb-1.5 block text-[10px] text-slate-500">Weight</span><input type="number" min="1" max="100" value={newProcWeight} onChange={(e) => setNewProcWeight(e.target.value)} className="field w-full" /></label>
+                      <div className="col-span-2 flex items-end gap-2">
+                        <button type="submit" className="flex-1 rounded-lg bg-slate-100 px-3.5 py-2.5 text-xs font-semibold text-slate-900 transition hover:bg-white"><Plus className="mr-1 inline h-3.5 w-3.5" />Create</button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            addProcess(e);
+                            setTimeout(() => socket.emit('cmd:step'), 150);
+                          }}
+                          title="Create process and advance clock by 1 tick immediately"
+                          className="flex-1 rounded-lg border border-sky-400/30 bg-sky-500/20 px-3.5 py-2.5 text-xs font-semibold text-sky-200 transition hover:bg-sky-500/30"
+                        >
+                          <Play className="mr-1 inline h-3.5 w-3.5" />Create & Step
+                        </button>
+                      </div>
                     </div>
                   </form>
                 </div>
@@ -1439,37 +1523,264 @@ export default function App() {
 
               {win.id === 'scheduler' && (
                 <div>
-                  <SectionHeading eyebrow="Kernel / CPU" title="Scheduling laboratory" description="Compare scheduling policies using the active simulated processes." icon={Activity} action={(() => {
-                    const runningProc = processes.find((p) => p.state === 'RUNNING');
-                    if (runningProc) {
-                      return <span className="rounded-md border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] text-emerald-300"><span className="text-emerald-400">Current CPU:</span> {runningProc.name} ({runningProc.pid})</span>;
+                  <SectionHeading
+                    eyebrow="Kernel / CPU"
+                    title="Scheduling laboratory"
+                    description="The C++ engine makes every scheduling decision. Inspect the live run queue, per-process virtual runtime, and the resulting Gantt chart."
+                    icon={Activity}
+                    action={
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="flex items-center gap-1.5 rounded-lg border border-white/[0.08] bg-black/40 px-3 py-1.5 font-mono text-xs">
+                          <Clock3 className="h-3.5 w-3.5 text-sky-400" />
+                          <span className="text-slate-400">Tick</span>
+                          <span className="font-bold text-sky-300">{currentTick}</span>
+                          <span className={`ml-1.5 inline-block h-2 w-2 rounded-full ${isClockRunning ? 'animate-pulse bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : 'bg-slate-500'}`} />
+                          <span className="text-[10px] text-slate-400">{isClockRunning ? 'Running' : 'Paused'}</span>
+                        </div>
+                        {!activeCpu.isIdle ? (
+                          <span className="rounded-md border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] text-emerald-300"><span className="text-emerald-400">CPU:</span> {activeProcess?.name ?? activeCpu.name} ({activeCpu.pid})</span>
+                        ) : orderedReadyProcesses.length ? (
+                          <span className="rounded-md border border-amber-400/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300"><span className="text-amber-400">Next:</span> {orderedReadyProcesses[0].name} ({orderedReadyProcesses[0].pid})</span>
+                        ) : (
+                          <span className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-[11px] text-slate-500">CPU: Idle</span>
+                        )}
+                      </div>
                     }
-                    const readyProcs = processes.filter((p) => p.state === 'READY');
-                    if (readyProcs.length) {
-                      return <span className="rounded-md border border-amber-400/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300"><span className="text-amber-400">Next CPU:</span> {readyProcs[0].name} ({readyProcs[0].pid})</span>;
-                    }
-                    return <span className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-[11px] text-slate-500">CPU: Idle</span>;
-                  })()} />
-                  <div className="mb-5 flex flex-wrap items-end gap-3 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
-                    <label className="min-w-[220px] flex-1"><span className="mb-1.5 block text-[10px] text-slate-500">Scheduling algorithm</span><select value={schedAlgo} onChange={(e) => setSchedAlgo(e.target.value)} className="field w-full"><option value="FCFS">First Come, First Served (FCFS)</option><option value="SJF">Shortest Job First (SJF)</option><option value="RR">Round Robin (RR)</option><option value="PRIORITY">Priority (lower number first)</option></select></label>
-                    {schedAlgo === 'RR' && <label className="w-28"><span className="mb-1.5 block text-[10px] text-slate-500">Time quantum</span><input type="number" min="1" value={timeQuantum} onChange={(e) => setTimeQuantum(Number(e.target.value))} className="field w-full" /></label>}
-                    <button onClick={runSchedulerSimulation} className="rounded-lg bg-emerald-500 px-4 py-2.5 text-xs font-semibold text-[#08120d] transition hover:bg-emerald-400"><Play className="mr-1.5 inline h-3.5 w-3.5" />Run simulation</button>
+                  />
+
+                  <div className="mb-4 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+                    <div className="flex flex-wrap items-end gap-3">
+                      <label className="min-w-[240px] flex-1"><span className="mb-1.5 block text-[10px] text-slate-500">Scheduling algorithm</span>
+                        <select value={schedAlgo} onChange={(e) => setSchedAlgo(e.target.value)} className="field w-full">
+                          {SCHEDULER_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                        </select>
+                      </label>
+                      {schedAlgo === 'RR' && <label className="w-28"><span className="mb-1.5 block text-[10px] text-slate-500">Time quantum</span><input type="number" min="1" value={timeQuantum} onChange={(e) => setTimeQuantum(Number(e.target.value))} className="field w-full" /></label>}
+                      {schedAlgo === 'CFS' && (
+                        <>
+                          <label className="w-32"><span className="mb-1.5 block text-[10px] text-slate-500">Target latency</span><input type="number" min="1" value={targetLatency} onChange={(e) => setTargetLatency(e.target.value)} className="field w-full" /></label>
+                          <label className="w-32"><span className="mb-1.5 block text-[10px] text-slate-500">Min granularity</span><input type="number" min="1" value={minGranularity} onChange={(e) => setMinGranularity(e.target.value)} className="field w-full" /></label>
+                        </>
+                      )}
+                      <button onClick={runSchedulerSimulation} className="rounded-lg bg-emerald-500 px-4 py-2.5 text-xs font-semibold text-[#08120d] transition hover:bg-emerald-400"><Play className="mr-1.5 inline h-3.5 w-3.5" />Run simulation</button>
+                      <button onClick={toggleClock} className={`flex items-center rounded-lg border px-3.5 py-2.5 text-xs font-semibold transition ${isClockRunning ? 'border-amber-400/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20' : 'border-white/[0.08] bg-white/[0.03] text-slate-300 hover:bg-white/[0.08]'}`}>
+                        {isClockRunning ? <><Pause className="mr-1.5 h-3.5 w-3.5" />Pause</> : <><Play className="mr-1.5 h-3.5 w-3.5" />Resume</>}
+                      </button>
+                      <button onClick={resetSchedulerStats} className="flex items-center rounded-lg border border-white/[0.08] bg-white/[0.03] px-3.5 py-2.5 text-xs text-slate-300 transition hover:bg-white/[0.08]"><RotateCcw className="mr-1.5 h-3.5 w-3.5" />Reset stats</button>
+                    </div>
+                    <p className="mt-2 text-[10px] leading-4 text-slate-500">
+                      Run simulation rewinds the process table to tick 0 (bursts and arrivals are restored), then streams STEP results from the engine. Reset stats keeps the current clock position and only clears counters, vruntime, timeline, and decisions.
+                    </p>
                   </div>
-                  <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <StatCard label="Average waiting time" value={schedulerMetrics.averageWaiting} helper="Time units · last simulation" icon={Clock3} />
-                    <StatCard label="Average turnaround" value={schedulerMetrics.averageTurnaround} helper="Time units · last simulation" icon={Activity} />
+
+                  {schedAlgo === 'CFS' && (
+                    <div className="mb-4 rounded-xl border border-emerald-400/20 bg-emerald-400/[0.035] p-4">
+                      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <Activity className="h-4 w-4 text-emerald-300" />
+                          <h3 className="text-xs font-semibold text-emerald-100">CFS live state</h3>
+                        </div>
+                        <span className="rounded-md border border-emerald-400/20 bg-emerald-400/[0.08] px-2 py-1 font-mono text-[10px] text-emerald-200">
+                          {cfsState ? `current PID ${cfsState.currentPID || '—'}` : 'waiting for engine'}
+                        </span>
+                      </div>
+                      {cfsState ? (
+                        <>
+                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                            {[
+                              ['Min vruntime', Number(cfsState.minVruntime ?? 0).toFixed(2)],
+                              ['Runnable tasks', cfsState.runnableCount ?? 0],
+                              ['Slice', `${cfsState.currentSlice ?? 0}u`],
+                              ['Preemptions', cfsState.preemptions ?? 0],
+                            ].map(([label, value]) => (
+                              <div key={label} className="rounded-lg border border-white/[0.06] bg-black/20 px-3 py-2">
+                                <div className="text-[9px] uppercase tracking-[0.12em] text-slate-500">{label}</div>
+                                <div className="mt-1 font-mono text-sm font-semibold text-emerald-100">{value}</div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="mt-3 rounded-lg border border-white/[0.06] bg-black/20 px-3 py-2.5">
+                            <div className="flex items-center justify-between text-[10px] text-slate-400">
+                              <span>Current slice budget</span>
+                              <span className="font-mono">{cfsState.sliceRemaining ?? 0}u / {cfsState.currentSlice ?? 0}u left</span>
+                            </div>
+                            <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
+                              <div
+                                className="h-full rounded-full bg-emerald-400 transition-all"
+                                style={{ width: `${cfsState.currentSlice > 0 ? Math.max(0, Math.min(100, (cfsState.sliceRemaining / cfsState.currentSlice) * 100)) : 0}%` }}
+                              />
+                            </div>
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-slate-500">
+                            <span>target latency <span className="font-mono text-slate-300">{Number(cfsState.targetLatency ?? 0).toFixed(2)}</span></span>
+                            <span>min granularity <span className="font-mono text-slate-300">{Number(cfsState.minGranularity ?? 0).toFixed(2)}</span></span>
+                            <span>base weight <span className="font-mono text-slate-300">{Number(cfsState.baseWeight ?? 0).toFixed(2)}</span></span>
+                          </div>
+                          <p className="mt-2 break-words rounded-lg border border-emerald-400/10 bg-emerald-400/[0.04] px-3 py-2 font-mono text-[10px] leading-relaxed text-emerald-200/80">
+                            <span className="text-slate-500">last decision › </span>{cfsState.lastReason || '—'}
+                          </p>
+                        </>
+                      ) : (
+                        <p className="py-3 text-xs text-slate-400">Run the simulation to stream CFS bookkeeping (min vruntime, slice budget, and preemptions) from the C++ engine.</p>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                    <StatCard label="Avg waiting" value={formatMetric(schedulerMetrics.averageWaiting)} helper="Time units · completed" icon={Clock3} />
+                    <StatCard label="Avg turnaround" value={formatMetric(schedulerMetrics.averageTurnaround)} helper="Time units · completed" icon={Activity} />
+                    <StatCard label="Avg response" value={formatMetric(schedulerMetrics.averageResponse)} helper="First CPU dispatch" icon={Zap} />
+                    <StatCard label="CPU utilization" value={formatMetric(schedulerMetrics.cpuUtilization, '%')} helper={`${schedulerMetrics.busyTicks ?? 0} busy / ${(schedulerMetrics.busyTicks ?? 0) + (schedulerMetrics.idleTicks ?? 0)} ticks`} icon={Cpu} />
+                    <StatCard label="Context switches" value={formatIntegerMetric(schedulerMetrics.contextSwitches)} helper={`${schedulerMetrics.completedProcesses ?? 0} of ${schedulerMetrics.totalProcesses ?? processes.length} done`} icon={SlidersHorizontal} />
                   </div>
-                  <div className="rounded-xl border border-white/[0.08] bg-[#101317] p-4">
-                    <div className="mb-4 flex items-center justify-between"><h3 className="text-xs font-semibold text-slate-300">Execution timeline</h3><span className="text-[10px] text-slate-500">{ganttTimeline.length} CPU slices</span></div>
-                    {ganttTimeline.length ? <div className="overflow-x-auto pb-2"><div className="flex min-w-max items-stretch gap-1.5">
-                      {ganttTimeline.map((slice, index) => <div key={`${slice.pid}-${slice.start}-${index}`} style={{ width: Math.max(92, Math.min(180, slice.duration * 25 + 55)) }} className="overflow-hidden rounded-lg border border-emerald-300/20 bg-emerald-400/[0.07]">
-                        <div className="border-b border-white/[0.06] px-3 py-2 text-[10px] text-slate-400">{slice.start} – {slice.end}</div><div className="px-3 py-3"><div className="truncate text-xs font-semibold text-emerald-200">{slice.name}</div><div className="mt-1 text-[10px] text-slate-500">PID {slice.pid} · {slice.duration}u</div></div>
-                      </div>)}
-                    </div></div> : <p className="py-8 text-center text-xs text-slate-500">No runnable processes to schedule.</p>}
+
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                    <div className="rounded-xl border border-white/[0.08] bg-[#101317] p-4">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-xs font-semibold text-slate-300">Running process</h3>
+                        <span className="text-[10px] text-slate-500">engine telemetry</span>
+                      </div>
+                      {!activeCpu.isIdle ? (
+                        <div className="mt-3 flex items-center gap-3">
+                          <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border font-mono text-[11px] font-semibold ${getProcColor(activeCpu.pid).border} ${getProcColor(activeCpu.pid).bg} ${getProcColor(activeCpu.pid).text}`}>
+                            {activeCpu.pid}
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-semibold text-slate-100">{activeProcess?.name ?? activeCpu.name}</div>
+                            <div className="mt-1 font-mono text-[10px] text-slate-500">
+                              {activeProcess ? `${activeProcess.remaining}u / ${activeProcess.burst}u left · weight ${activeProcess.weight}` : 'recently dispatched'}
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="font-mono text-sm font-semibold text-emerald-200">{Number(activeProcess?.vruntime ?? 0).toFixed(2)}</div>
+                            <div className="text-[9px] uppercase tracking-[0.12em] text-slate-500">vruntime</div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="mt-3 rounded-lg border border-dashed border-white/[0.08] px-3 py-4 text-center text-xs text-slate-500">CPU idle — no process was dispatched in the last tick.</div>
+                      )}
+
+                      <div className="mt-4">
+                        <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.12em] text-slate-500">
+                          <span>Ready queue</span>
+                          <span>{orderedReadyProcesses.length} task(s)</span>
+                        </div>
+                        {orderedReadyProcesses.length ? (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {orderedReadyProcesses.map((process) => {
+                              const color = getProcColor(process.pid);
+                              return (
+                                <span key={process.pid} className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[10px] ${color.border} ${color.bg} ${color.text}`}>
+                                  <span className={`h-1.5 w-1.5 rounded-full ${color.dot}`} />
+                                  {process.pid} · {process.name} · vr {Number(process.vruntime ?? 0).toFixed(2)}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="mt-2 rounded-lg border border-dashed border-white/[0.08] px-3 py-3 text-center text-[11px] text-slate-500">Ready queue is empty.</div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-white/[0.08] bg-[#101317] p-4">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-xs font-semibold text-slate-300">Virtual runtime</h3>
+                        <span className="font-mono text-[10px] text-slate-500">scale 0 – {maxVruntime.toFixed(2)}</span>
+                      </div>
+                      {vruntimeProcesses.length ? (
+                        <div className="mt-3 space-y-2.5">
+                          {vruntimeProcesses.map((process) => {
+                            const color = getProcColor(process.pid);
+                            const width = Math.max(1.5, Math.min(100, (Number(process.vruntime || 0) / maxVruntime) * 100));
+                            return (
+                              <div key={process.pid}>
+                                <div className="mb-1 flex items-center justify-between gap-2 text-[10px]">
+                                  <span className="truncate text-slate-400"><span className={`mr-1.5 inline-block h-1.5 w-1.5 rounded-full ${color.dot}`} />{process.pid} · {process.name}</span>
+                                  <span className="shrink-0 font-mono text-slate-300">{Number(process.vruntime ?? 0).toFixed(2)}</span>
+                                </div>
+                                <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
+                                  <div className={`h-full rounded-full ${color.dot} transition-all`} style={{ width: `${width}%` }} />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p className="py-6 text-center text-xs text-slate-500">No vruntime recorded yet.</p>
+                      )}
+                    </div>
                   </div>
-                  <div className="mt-5 rounded-xl border border-white/[0.08] bg-[#101317] p-4 font-mono">
-                    <div className="mb-3 flex items-center gap-2 text-[10px] uppercase tracking-[0.12em] text-slate-500"><Terminal className="h-3.5 w-3.5" />Scheduler log</div>
-                    <div className="space-y-2">{schedulerLog.map((line, index) => <p key={`${index}-${line}`} className="break-words text-[11px] leading-relaxed text-emerald-200/80"><span className="mr-2 text-slate-600">›</span>{line}</p>)}</div>
+
+                  <div className="mt-4 rounded-xl border border-white/[0.08] bg-[#101317] p-4">
+                    <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="text-xs font-semibold text-slate-300">Execution timeline</h3>
+                      <span className="text-[10px] text-slate-500">{ganttTimeline.length} CPU slice(s) · {schedulerMetrics.busyTicks ?? 0} busy tick(s)</span>
+                    </div>
+                    {ganttTimeline.length ? (
+                      <div className="overflow-x-auto pb-2">
+                        <div className="flex min-w-max items-stretch gap-1.5">
+                          {ganttTimeline.map((slice, index) => {
+                            const color = getProcColor(slice.pid);
+                            return (
+                              <div key={`${slice.pid}-${slice.start}-${index}`} style={{ width: Math.max(92, Math.min(180, slice.duration * 25 + 55)) }} className={`overflow-hidden rounded-lg border ${color.border} ${color.bg}`}>
+                                <div className="border-b border-white/[0.06] px-3 py-2 text-[10px] text-slate-400">{slice.start} – {slice.end}</div>
+                                <div className="px-3 py-3">
+                                  <div className={`truncate text-xs font-semibold ${color.text}`}>{slice.name}</div>
+                                  <div className="mt-1 text-[10px] text-slate-500">PID {slice.pid} · {slice.duration}u</div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="py-8 text-center text-xs text-slate-500">No CPU slices yet. Add a process and run the simulation.</p>
+                    )}
+                  </div>
+
+                  <div className="mt-4 rounded-xl border border-white/[0.08] bg-[#101317] p-4">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="text-xs font-semibold text-slate-300">Per-process metrics</h3>
+                      <span className="text-[10px] text-slate-500">{schedulerMetrics.completedProcesses ?? 0} completed · source: engine PCB</span>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[900px] text-left text-xs">
+                        <thead className="bg-white/[0.025] text-[10px] uppercase tracking-[0.11em] text-slate-500">
+                          <tr>{['PID', 'Process', 'State', 'Weight', 'Vruntime', 'CPU', 'First run', 'Done', 'Wait', 'Turnaround', 'Response'].map((heading) => <th key={heading} className="whitespace-nowrap px-2.5 py-2 font-medium">{heading}</th>)}</tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/[0.045] font-mono text-[11px]">
+                          {processes.map((process) => (
+                            <tr key={process.pid} className="transition hover:bg-white/[0.02]">
+                              <td className="px-2.5 py-2 text-slate-400">{process.pid}</td>
+                              <td className="px-2.5 py-2 font-sans text-slate-200">{process.name}</td>
+                              <td className="px-2.5 py-2">
+                                <span className={`rounded px-1.5 py-0.5 text-[9px] ${process.state === 'TERMINATED' ? 'bg-slate-400/[0.08] text-slate-400' : process.state === 'READY' ? 'bg-amber-300/[0.08] text-amber-200' : process.state === 'NEW' ? 'bg-sky-400/[0.08] text-sky-300' : 'bg-emerald-400/[0.08] text-emerald-300'}`}>{process.state}</span>
+                              </td>
+                              <td className="px-2.5 py-2 text-slate-400">{process.weight}</td>
+                              <td className="px-2.5 py-2 text-emerald-200">{Number(process.vruntime ?? 0).toFixed(2)}</td>
+                              <td className="px-2.5 py-2 text-slate-400">{process.cpuTime ?? 0}u</td>
+                              <td className="px-2.5 py-2 text-slate-400">{process.firstRunTime >= 0 ? process.firstRunTime : '—'}</td>
+                              <td className="px-2.5 py-2 text-slate-400">{process.completionTime >= 0 ? process.completionTime : '—'}</td>
+                              <td className="px-2.5 py-2 text-slate-400">{process.waitingTime ?? 0}u</td>
+                              <td className="px-2.5 py-2 text-slate-400">{process.turnaroundTime ?? 0}u</td>
+                              <td className="px-2.5 py-2 text-slate-400">{process.responseTime ?? 0}u</td>
+                            </tr>
+                          ))}
+                          {!processes.length && <tr><td colSpan="11" className="px-4 py-6 text-center font-sans text-slate-500">No processes in the engine.</td></tr>}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 rounded-xl border border-white/[0.08] bg-[#101317] p-4 font-mono">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.12em] text-slate-500"><Terminal className="h-3.5 w-3.5" />Decisions &amp; state transitions</div>
+                      <span className="text-[10px] text-slate-600">{schedulerLog.length} line(s)</span>
+                    </div>
+                    <div className="max-h-64 space-y-1.5 overflow-y-auto pr-1">
+                      {schedulerLog.map((line, index) => <p key={`${index}-${line}`} className="break-words text-[11px] leading-relaxed text-emerald-200/80"><span className="mr-2 text-slate-600">›</span>{line}</p>)}
+                    </div>
                   </div>
                 </div>
               )}

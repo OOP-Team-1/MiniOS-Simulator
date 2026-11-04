@@ -4,6 +4,7 @@
 #include <string>
 #include <memory>
 #include <deque>
+#include <map>
 
 #include "ProcessManager.h"
 #include "CPU.h"
@@ -11,6 +12,30 @@
 #include "MemoryManager.h"
 #include "PagingManager.h"
 #include "FileSystem.h"
+
+// One contiguous burst of CPU execution by a single process. Consecutive
+// one-tick steps for the same PID are merged so the frontend receives a real
+// Gantt chart instead of one slice per tick.
+struct ExecutionSlice
+{
+    std::string pid;
+    std::string name;
+    int start;
+    int end;
+    int duration;
+};
+
+// A scheduling event produced by the engine. Events are the source of truth
+// for the UI's "scheduling decisions" log; the frontend never derives them
+// from a JavaScript simulation.
+struct SimulationEvent
+{
+    long long seq;
+    int tick;
+    std::string type;
+    std::string pid;
+    std::string message;
+};
 
 class SimulationEngine
 {
@@ -30,8 +55,30 @@ private:
     int schedulerQuantum;
     std::string allocName;
 
+    // Scheduling telemetry (shared by all algorithms where applicable)
+    std::vector<ExecutionSlice> timeline;
+    std::vector<SimulationEvent> tickEvents;
+    std::vector<std::string> lastReadyQueue;
+    std::map<std::string, std::string> lastProcessStates;
+    std::string lastDispatchPID;
+    long long eventSequence;
+    int contextSwitches;
+    int busyTicks;
+    int idleTicks;
+    std::string lastDispatchReason;
+
     void log(const std::string& message);
     void checkPendingProcesses();
+
+    void recordEvent(const std::string& type, const std::string& pid, const std::string& message);
+    void recordStateChanges();
+    void recordReadyQueueChange();
+    void resetSchedulingTelemetry();
+
+    std::string metricsJson() const;
+    std::string timelineJson() const;
+    std::string eventsJson() const;
+    std::string readyQueueJson() const;
 
 public:
     SimulationEngine(
@@ -52,7 +99,8 @@ public:
         int priority,
         int arrivalTime,
         int burstTime,
-        int memoryRequired
+        int memoryRequired,
+        int weight = 10
     );
 
     // Directory operations — called by main.cpp command handler
@@ -90,6 +138,16 @@ public:
     void run();
 
     void reset();
+
+    // Clears timeline/metrics/vruntime without deleting the process table.
+    // Used when the user starts a fresh scheduling run.
+    void resetStatistics();
+
+    // Rewinds the whole simulation to tick 0 while keeping the process table.
+    // Every process gets its full burst back and is re-admitted through the
+    // normal arrival/memory path, so the same workload can be compared across
+    // scheduling algorithms.
+    void restartRun();
 
     bool killProcess(const std::string& pid);
 

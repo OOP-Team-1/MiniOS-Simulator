@@ -20,6 +20,7 @@ add_executable(main
     ../src/SRTFScheduler.cpp
     ../src/PriorityScheduler.cpp
     ../src/RoundRobinScheduler.cpp
+    ../src/CFSScheduler.cpp
 
     ../src/Kernel.cpp
 

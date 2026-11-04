@@ -630,6 +630,8 @@ bool Kernel::runStep()
      *
      * CPU already implements these transitions.
      */
+    selectedProcess->markFirstRun(currentTime);
+
     cpu.execute(
         *selectedProcess,
         executionTime
@@ -640,11 +642,22 @@ bool Kernel::runStep()
      */
     currentTime += executionTime;
 
+    selectedProcess->addCpuTime(executionTime);
+
+    /*
+     * Report the executed time back to the scheduler. CFS uses this hook to
+     * accumulate virtual runtime; the other schedulers ignore it.
+     */
+    scheduler.onProcessExecuted(*selectedProcess, executionTime);
+
     /*
      * If the process completed, release all resources.
      */
     if (selectedProcess->getState() == "TERMINATED")
     {
+        selectedProcess->markCompleted(currentTime);
+        scheduler.onProcessCompleted(*selectedProcess);
+
         releaseProcessResources(
             *selectedProcess
         );

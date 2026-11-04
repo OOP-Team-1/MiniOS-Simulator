@@ -12,7 +12,7 @@ class ProcessManager
         int nextPID;
     public:
         ProcessManager();
-        Process& createProcess(std::string name,int priority,int arrivalTime,int burstTime,int memoryRequired);
+        Process& createProcess(std::string name,int priority,int arrivalTime,int burstTime,int memoryRequired,int weight=10);
         Process* getProcess(const std::string& PID);
         bool removeProcess(const std::string& PID);
         std::vector<Process*> getAllProcesses();
