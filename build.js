@@ -8,6 +8,15 @@ const __dirname = path.dirname(__filename);
 
 const engineDir = path.resolve(__dirname, 'engine');
 const buildDir = path.resolve(engineDir, 'build');
+const targetBin = process.platform === 'win32'
+    ? path.join(buildDir, 'main.exe')
+    : path.join(buildDir, 'main');
+
+// Fast-path: if invoked with --if-needed and binary already exists, skip compiling
+if (process.argv.includes('--if-needed') && fs.existsSync(targetBin)) {
+    console.log('[build:engine] Engine binary already built at:', targetBin);
+    process.exit(0);
+}
 
 function commandAvailable(cmd, testArg = '--version') {
     try {
@@ -36,7 +45,11 @@ function getCMakeCommand() {
         try {
             fs.mkdirSync(localCmakeDir, { recursive: true });
             const tarUrl = 'https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz';
-            const res = spawnSync('sh', ['-c', `curl -sL "${tarUrl}" | tar -xz --strip-components=1 -C "${localCmakeDir}"`], {
+            const tmpTar = path.join(localCmakeDir, 'cmake.tar.gz');
+
+            // Download to temporary archive file with automatic retries, then extract cleanly
+            const downloadCmd = `curl -fsSL --retry 3 --retry-delay 2 "${tarUrl}" -o "${tmpTar}" && tar -xzf "${tmpTar}" --strip-components=1 -C "${localCmakeDir}" && rm -f "${tmpTar}"`;
+            const res = spawnSync('sh', ['-c', downloadCmd], {
                 stdio: 'inherit'
             });
 
@@ -107,8 +120,8 @@ function runCMake() {
         }
     }
 
-    console.log('[build:engine] Compiling C++ engine (Release)...');
-    const build = spawnSync(cmakeCmd, ['--build', buildDir, '--config', 'Release'], { stdio: 'inherit' });
+    console.log('[build:engine] Compiling C++ engine in parallel (Release)...');
+    const build = spawnSync(cmakeCmd, ['--build', buildDir, '--config', 'Release', '--parallel'], { stdio: 'inherit' });
 
     if (build.status !== 0) {
         console.error('[build:engine] CMake build failed.');
